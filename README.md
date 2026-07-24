@@ -33,12 +33,14 @@ const flags = await createDistributedMap<boolean>("feature-flags", {
   client: redis,
 });
 
-await flags.set("new-checkout", true);
+flags.set("new-checkout", true);
 
-// Map-like reads never make a network round-trip.
+// Reads and writes touch local memory immediately.
 console.log(flags.get("new-checkout")); // true
 console.log(flags.size);                // 1
 
+// Establish an explicit durability boundary before shutdown.
+await flags.flush();
 await flags.destroy();
 await redis.quit();
 ```
@@ -49,38 +51,49 @@ await redis.quit();
 |---|---|---|
 | `map.get(key)` | `map.get(key)` | Synchronous local read |
 | `map.has(key)` | `map.has(key)` | Synchronous local read |
-| `map.set(key, value)` | `await map.set(key, value)` | Redis is committed first |
-| `map.delete(key)` | `await map.delete(key)` | Resolves to `boolean` |
-| `map.clear()` | `await map.clear()` | Broadcast to every instance |
+| `map.set(key, value)` | `map.set(key, value)` | Synchronous local write |
+| `map.delete(key)` | `map.delete(key)` | Synchronous local write |
+| `map.clear()` | `map.clear()` | Synchronous local write |
 | iteration | iteration | Entries come from local memory |
 
 It is a good fit for shared configuration, feature flags, presence metadata,
-lightweight registries, and read-heavy state where processes need fast local
-access and Redis is the source of truth.
+market prices, lightweight registries, and high-frequency state where processes
+need fast local access and Redis is the source of truth.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  A["Node A<br/>local Map"] -->|"HSET + XADD<br/>(atomic transaction)"| R[("Redis<br/>Hash + Stream")]
+  A["Node A<br/>local Map"] -->|"coalesced patch<br/>every ≤50ms"| W["write-behind<br/>buffer"]
+  W -->|"HSET + XADD<br/>(atomic transaction)"| R[("Redis<br/>Hash + Stream")]
   B["Node B<br/>local Map"] -->|"XREAD"| R
   R -->|"ordered events"| B
   R -->|"ordered events"| C["Node C<br/>local Map"]
 ```
 
-Each write updates a Redis Hash and appends an event to a Redis Stream in one
-transaction. Every instance keeps a blocking stream reader on a duplicated
-ioredis connection. Startup and manual synchronization load the hash and stream
-cursor atomically, so reads can stay entirely local.
+Local mutations are coalesced by key for up to `flushIntervalMs` and persisted
+as one patch. The patch updates the Redis Hash and appends a Redis Stream event
+in one transaction. Every instance keeps a blocking stream reader on a
+duplicated ioredis connection.
+
+The Stream retains ten seconds of patches by default using `XADD MINID`.
+Periodic Hash snapshots repair replicas that were offline longer than the
+retention window.
 
 ### Consistency model
 
-- A completed write is durable in Redis and immediately visible to its caller.
-- Other healthy instances converge asynchronously, normally in a few milliseconds.
+- A local write is immediately visible to its caller but is not yet durable.
+- `flush()` makes every mutation queued before the call durable and broadcast.
+- Automatic flushes run at most `flushIntervalMs` after the first pending write.
+- Updates to the same key inside one window are coalesced to the latest value.
+- Other healthy instances normally converge within the flush interval plus
+  Redis/network latency.
 - Events are applied in Redis Stream ID order and duplicate events are ignored.
-- `synchronize()` reloads an authoritative snapshot after a suspected gap.
+- Periodic `synchronize()` calls reload the authoritative Hash after trimmed gaps.
+- An abrupt process crash can lose up to one flush window of local mutations.
 - This is not a linearizable distributed data structure: a remote instance can
-  briefly return its previous local value while an event is in flight.
+  briefly return its previous value, and concurrent writers resolve in Redis
+  arrival order.
 
 ## Installation
 
@@ -88,7 +101,7 @@ cursor atomically, so reads can stay entirely local.
 npm install redis-dist-map ioredis
 ```
 
-Requires Node.js 18+, ioredis 5+, and Redis 5+ (Redis Streams).
+Requires Node.js 18+, ioredis 5+, and Redis 6.2+ (`XADD MINID`).
 
 ## API
 
@@ -103,6 +116,9 @@ type DistributedMapOptions<T> = {
   serialize?: (value: T) => string;
   deserialize?: (value: string) => T;
   blockTimeoutMs?: number;
+  flushIntervalMs?: number;       // default: 50
+  historyMs?: number;             // default: 10_000
+  synchronizeIntervalMs?: number; // default: historyMs / 2
   onError?: (error: unknown) => void;
 };
 ```
@@ -118,14 +134,37 @@ const deadlines = await createDistributedMap<Date>("deadlines", {
 });
 ```
 
+### `set`, `delete`, and `clear`
+
+Mutations update local memory synchronously and enter the write-behind buffer.
+They do not wait for Redis:
+
+```ts
+prices.set("AAPL", { bid: 213.41, ask: 213.43 });
+prices.set("AAPL", { bid: 213.42, ask: 213.44 });
+
+// Only the latest AAPL quote is included in the next patch.
+```
+
+### `flush()`
+
+Immediately persists and publishes every mutation queued before the call.
+Flushes are serialized, and mutations arriving during a flush remain in the
+next buffer.
+
+```ts
+await prices.flush();
+```
+
 ### Lifecycle
 
-Call `destroy()` when an instance shuts down. It stops the listener and closes
-only the duplicated connection owned by the map; your original Redis client
-remains yours.
+Call `flush()` during graceful shutdown, then call `destroy()`. Destroy stops
+the timers/listener and closes only the duplicated connection owned by the map;
+it intentionally does not flush pending mutations.
 
 ```ts
 process.once("SIGTERM", async () => {
+  await flags.flush();
   await flags.destroy();
   await redis.quit();
 });
@@ -134,8 +173,12 @@ process.once("SIGTERM", async () => {
 ## Operational notes
 
 - The map uses two keys: `<name>` for the hash and `<name>:stream` for events.
-- Stream history is not trimmed automatically. Apply a retention policy only
-  after considering how long disconnected consumers may need to catch up.
+- Stream patches are trimmed by age on every flush. During a completely idle
+  period, the last retained patch remains until another flush performs trimming.
+- The default 50ms buffer emits at most 20 transactions per second per active
+  map, regardless of how many same-key updates are coalesced inside each window.
+- `historyMs` uses the local clock to derive Redis Stream ID cutoffs; keep
+  application and Redis host clocks synchronized.
 - Values must serialize to a string. Default JSON serialization rejects
   `undefined`, functions, and symbols.
 - Use a unique, namespaced map name such as `my-app:prod:feature-flags`.

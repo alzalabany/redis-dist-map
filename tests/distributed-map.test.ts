@@ -3,7 +3,11 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDistributedMap, type DistributedMap } from "../src/index.js";
+import {
+  createDistributedMap,
+  type DistributedMap,
+  type DistributedMapOptions,
+} from "../src/index.js";
 
 let server: ChildProcessWithoutNullStreams;
 let client: Redis;
@@ -36,10 +40,14 @@ async function waitFor(
   }
 }
 
-async function makeMap<T>(name: string): Promise<DistributedMap<T>> {
+async function makeMap<T>(
+  name: string,
+  options: Partial<DistributedMapOptions<T>> = {},
+): Promise<DistributedMap<T>> {
   const map = await createDistributedMap<T>(name, {
     client,
     blockTimeoutMs: 50,
+    ...options,
   });
   maps.push(map as DistributedMap<unknown>);
   return map;
@@ -107,6 +115,45 @@ describe("createDistributedMap", () => {
     expect(visited).toEqual(["ada:42", "grace:99"]);
   });
 
+  it("coalesces local writes into one durable patch on flush", async () => {
+    const map = await makeMap<number>("test:write-behind", {
+      flushIntervalMs: 10_000,
+    });
+
+    map.set("a", 1);
+    map.set("a", 2);
+    map.set("b", 3);
+
+    expect(map.get("a")).toBe(2);
+    expect(await client.hgetall("test:write-behind")).toEqual({});
+
+    await map.flush();
+
+    expect(await client.hgetall("test:write-behind")).toEqual({
+      a: "2",
+      b: "3",
+    });
+    expect(await client.xlen("test:write-behind:stream")).toBe(1);
+
+    const entries = await client.xrevrange(
+      "test:write-behind:stream",
+      "+",
+      "-",
+      "COUNT",
+      1,
+    );
+    const fields = entries[0]?.[1] ?? [];
+    const patchIndex = fields.lastIndexOf("patch");
+    expect(JSON.parse(fields[patchIndex + 1] ?? "")).toEqual({
+      clear: false,
+      sets: [
+        ["a", "2"],
+        ["b", "3"],
+      ],
+      deletes: [],
+    });
+  });
+
   it("synchronizes writes, deletes, and clears across instances", async () => {
     const first = await makeMap<number>("test:replication");
     const second = await makeMap<number>("test:replication");
@@ -123,6 +170,78 @@ describe("createDistributedMap", () => {
     await waitFor(() => second.size === 2);
     await second.clear();
     await waitFor(() => first.size === 0);
+  });
+
+  it("keeps pending local state over older remote updates", async () => {
+    const map = await makeMap<number>("test:local-overlay", {
+      flushIntervalMs: 10_000,
+    });
+
+    map.set("price", 42);
+    await client
+      .multi()
+      .hset("test:local-overlay", "price", JSON.stringify(10))
+      .xadd(
+        "test:local-overlay:stream",
+        "*",
+        "operation",
+        "set",
+        "key",
+        "price",
+        "value",
+        JSON.stringify(10),
+      )
+      .exec();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(map.get("price")).toBe(42);
+    await map.flush();
+    expect(await client.hget("test:local-overlay", "price")).toBe("42");
+  });
+
+  it("trims stream entries older than historyMs", async () => {
+    await client.xadd(
+      "test:retention:stream",
+      "1-0",
+      "operation",
+      "clear",
+    );
+    const map = await makeMap<number>("test:retention", {
+      flushIntervalMs: 10_000,
+      historyMs: 10_000,
+    });
+
+    map.set("latest", 1);
+    await map.flush();
+
+    const entries = await client.xrange("test:retention:stream", "-", "+");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.[0]).not.toBe("1-0");
+  });
+
+  it("periodically repairs state from the authoritative Hash", async () => {
+    const map = await makeMap<number>("test:periodic-snapshot", {
+      synchronizeIntervalMs: 25,
+    });
+
+    await client.hset(
+      "test:periodic-snapshot",
+      "recovered",
+      JSON.stringify(99),
+    );
+    await waitFor(() => map.get("recovered") === 99);
+  });
+
+  it("does not make unflushed mutations durable during destroy", async () => {
+    const map = await makeMap<number>("test:destroy-with-pending", {
+      flushIntervalMs: 10_000,
+    });
+
+    map.set("local-only", 1);
+    await map.destroy();
+
+    expect(await client.hget("test:destroy-with-pending", "local-only")).toBeNull();
+    expect(await client.xlen("test:destroy-with-pending:stream")).toBe(0);
   });
 
   it("loads an existing snapshot and can reload authoritative state", async () => {
@@ -226,15 +345,34 @@ describe("createDistributedMap", () => {
         blockTimeoutMs: 0,
       }),
     ).rejects.toThrow("greater than zero");
+    await expect(
+      createDistributedMap("test:flush-timeout", {
+        client,
+        flushIntervalMs: 0,
+      }),
+    ).rejects.toThrow("flushIntervalMs");
+    await expect(
+      createDistributedMap("test:history", {
+        client,
+        historyMs: 0,
+      }),
+    ).rejects.toThrow("historyMs");
+    await expect(
+      createDistributedMap("test:synchronize-timeout", {
+        client,
+        synchronizeIntervalMs: 0,
+      }),
+    ).rejects.toThrow("synchronizeIntervalMs");
 
     const map = await makeMap<string>("test:destroy");
     await map.destroy();
-    await expect(map.set("nope", "value")).rejects.toThrow("is destroyed");
+    expect(() => map.set("nope", "value")).toThrow("is destroyed");
+    await expect(map.flush()).rejects.toThrow("is destroyed");
   });
 
   it("rejects values JSON cannot serialize", async () => {
     const map = await makeMap<undefined>("test:serialization");
-    await expect(map.set("undefined", undefined)).rejects.toThrow(
+    expect(() => map.set("undefined", undefined)).toThrow(
       "must be JSON serializable",
     );
   });

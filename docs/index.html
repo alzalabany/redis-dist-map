@@ -47,7 +47,7 @@
       <section class="hero">
         <div class="eyebrow reveal">
           <span class="pulse"></span>
-          Redis-backed. Memory-fast.
+          Write now. Sync in 50ms.
         </div>
         <h1 class="reveal delay-1">
           One map.<br />
@@ -55,7 +55,7 @@
         </h1>
         <p class="hero-copy reveal delay-2">
           A tiny TypeScript library that gives each Node.js process a fast local
-          <code>Map</code>—and keeps every copy synchronized through Redis.
+          <code>Map</code>—then coalesces and synchronizes changes through Redis.
         </p>
         <div class="hero-actions reveal delay-3">
           <div class="install">
@@ -114,7 +114,7 @@
       <section class="ticker" aria-label="Highlights">
         <div>
           <span>SYNC READS</span><i>◆</i>
-          <span>ATOMIC WRITES</span><i>◆</i>
+          <span>BATCHED WRITES</span><i>◆</i>
           <span>ORDERED EVENTS</span><i>◆</i>
           <span>FULLY TYPED</span><i>◆</i>
           <span>ZERO RUNTIME DEPENDENCIES</span>
@@ -124,10 +124,10 @@
       <section class="section" id="how">
         <div class="section-heading">
           <span class="index">01 / HOW</span>
-          <h2>Network on writes.<br /><span>Memory on reads.</span></h2>
+          <h2>Local on the hot path.<br /><span>Batched on the wire.</span></h2>
           <p>
-            Your hot path stays local. Redis handles durable state and ordered
-            change propagation behind a small, familiar interface.
+            Reads and writes touch memory immediately. Redis receives one
+            coalesced, durable patch every 50 milliseconds.
           </p>
         </div>
         <div class="features">
@@ -151,10 +151,10 @@
                 <path d="m7 16 6 6L26 9M4 4v24h24" />
               </svg>
             </div>
-            <h3>Commit atomically</h3>
+            <h3>Coalesce, then commit</h3>
             <p>
-              Hash mutations and Stream events happen in one Redis transaction,
-              so state and its change log never drift.
+              Repeated updates collapse by key, then the Hash and ten-second
+              Stream history update in one Redis transaction.
             </p>
           </article>
           <article>
@@ -187,7 +187,7 @@
           <ul>
             <li><span>✓</span> ESM and CommonJS</li>
             <li><span>✓</span> TypeScript declarations included</li>
-            <li><span>✓</span> Custom codecs supported</li>
+            <li><span>✓</span> 50ms coalesced patches</li>
           </ul>
         </div>
         <div class="code-window">
@@ -207,10 +207,13 @@
   { client: redis },
 );
 
-<span class="kw">await</span> flags.<span class="fn">set</span>(<span class="str">"new-checkout"</span>, <span class="bool">true</span>);
+flags.<span class="fn">set</span>(<span class="str">"new-checkout"</span>, <span class="bool">true</span>);
 
 <span class="comment">// synchronous — no Redis round trip</span>
-flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <span class="comment">// true</span></code></pre>
+flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <span class="comment">// true</span>
+
+<span class="comment">// explicit durability boundary</span>
+<span class="kw">await</span> flags.<span class="fn">flush</span>();</code></pre>
           <div class="window-status">
             <span><i></i> TYPESCRIPT</span>
             <span>UTF-8&nbsp;&nbsp; LN 15, COL 41</span>
@@ -226,8 +229,10 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
         <div class="api-grid">
           <div class="api-item"><code>.get(key)</code><span>→ T | undefined</span><p>Read from the local cache.</p></div>
           <div class="api-item"><code>.has(key)</code><span>→ boolean</span><p>Check the local cache.</p></div>
-          <div class="api-item"><code>.set(key, value)</code><span>→ Promise&lt;void&gt;</span><p>Commit and broadcast a value.</p></div>
-          <div class="api-item"><code>.delete(key)</code><span>→ Promise&lt;boolean&gt;</span><p>Remove and broadcast a key.</p></div>
+          <div class="api-item"><code>.set(key, value)</code><span>→ void</span><p>Update locally and queue a value.</p></div>
+          <div class="api-item"><code>.delete(key)</code><span>→ boolean</span><p>Delete locally and queue the key.</p></div>
+          <div class="api-item"><code>.clear()</code><span>→ void</span><p>Clear locally and queue the reset.</p></div>
+          <div class="api-item"><code>.flush()</code><span>→ Promise&lt;void&gt;</span><p>Persist and broadcast pending changes.</p></div>
           <div class="api-item"><code>.synchronize()</code><span>→ Promise&lt;void&gt;</span><p>Reload the Redis snapshot.</p></div>
           <div class="api-item"><code>.destroy()</code><span>→ Promise&lt;void&gt;</span><p>Stop listening and clean up.</p></div>
         </div>

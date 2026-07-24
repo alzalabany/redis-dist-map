@@ -7,9 +7,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Synchronous local reads with a familiar JavaScript `Map` interface.
-- Atomic Redis Hash writes and Redis Stream events.
+- Synchronous local reads and writes with a familiar JavaScript `Map` interface.
+- A 50ms write-behind buffer that coalesces repeated mutations by key.
+- Explicit `flush()` durability boundaries and serialized batch persistence.
+- Atomic Redis Hash patches and Redis Stream events.
+- Ten-second time-based Stream retention using `XADD MINID`.
 - Cross-process synchronization for set, delete, and clear operations.
-- Snapshot reloads and automatic recovery after malformed stream events.
+- Periodic snapshot reloads and automatic recovery after trimmed or malformed events.
 - Custom serialization and error reporting hooks.
 - Dual ESM/CommonJS package output with TypeScript declarations.
