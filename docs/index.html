@@ -117,7 +117,7 @@
           <span>BATCHED WRITES</span><i>◆</i>
           <span>ORDERED EVENTS</span><i>◆</i>
           <span>FULLY TYPED</span><i>◆</i>
-          <span>ZERO RUNTIME DEPENDENCIES</span>
+          <span>OPTIONAL MOBX ADAPTER</span>
         </div>
       </section>
 
@@ -188,6 +188,7 @@
             <li><span>✓</span> ESM and CommonJS</li>
             <li><span>✓</span> TypeScript declarations included</li>
             <li><span>✓</span> Reactive key subscriptions</li>
+            <li><span>✓</span> Optional shallow MobX adapter</li>
           </ul>
         </div>
         <div class="code-window">
@@ -239,6 +240,7 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
           <div class="api-item"><code>.flush()</code><span>→ Promise&lt;void&gt;</span><p>Persist and broadcast pending changes.</p></div>
           <div class="api-item"><code>.synchronize()</code><span>→ Promise&lt;void&gt;</span><p>Reload the Redis snapshot.</p></div>
           <div class="api-item"><code>.destroy()</code><span>→ Promise&lt;void&gt;</span><p>Stop listening and clean up.</p></div>
+          <div class="api-item"><code>redis-dist-map/mobx</code><span>→ optional</span><p>MobX-tracked reads and batched reactions.</p></div>
         </div>
       </section>
 
@@ -246,7 +248,7 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
         <div>
           <span class="index">READY?</span>
           <h2>Keep your state<br /><span>close.</span></h2>
-          <p>One dependency. One familiar abstraction. Every process in sync.</p>
+          <p>One familiar abstraction. Optional MobX. Every process in sync.</p>
           <div class="hero-actions">
             <a class="button light" href="https://www.npmjs.com/package/redis-dist-map">View on npm</a>
             <a class="text-link" href="https://github.com/alzalabany/redis-dist-map">Read the source →</a>

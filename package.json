@@ -10,7 +10,10 @@
     "typescript",
     "ioredis",
     "stream",
-    "sync"
+    "sync",
+    "mobx",
+    "observable",
+    "reactive"
   ],
   "homepage": "https://alzalabany.github.io/redis-dist-map/",
   "bugs": {
@@ -31,6 +34,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./mobx": {
+      "types": "./dist/mobx.d.ts",
+      "import": "./dist/mobx.js",
+      "require": "./dist/mobx.cjs"
     }
   },
   "files": [
@@ -50,12 +58,19 @@
     "prepack": "npm run check && npm run test && npm run build"
   },
   "peerDependencies": {
-    "ioredis": ">=5.0.0"
+    "ioredis": ">=5.0.0",
+    "mobx": ">=6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mobx": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.1.0",
     "@vitest/coverage-v8": "^3.2.4",
     "ioredis": "^5.6.1",
+    "mobx": "^6.16.1",
     "tsup": "^8.5.0",
     "typescript": "^5.8.3",
     "vite": "^6.1.0",

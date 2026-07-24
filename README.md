@@ -109,6 +109,7 @@ npm install redis-dist-map ioredis
 ```
 
 Requires Node.js 18+, ioredis 5+, and Redis 6.2+ (`XADD MINID`).
+MobX is optional and only needed when importing `redis-dist-map/mobx`.
 
 ## API
 
@@ -203,6 +204,58 @@ Subscriptions do not emit an initial value; call `get()` or iterate the map for
 the initial snapshot. A listener fires only when the serialized value changes
 or an existing key is deleted. Listener exceptions are isolated and forwarded
 to `onError`.
+
+### Optional MobX adapter
+
+Install MobX alongside the core package:
+
+```bash
+npm install redis-dist-map ioredis mobx
+```
+
+Then use the `redis-dist-map/mobx` entry point:
+
+```ts
+import Redis from "ioredis";
+import { autorun } from "mobx";
+import { createMobxDistributedMap } from "redis-dist-map/mobx";
+
+type Tick = {
+  time: number;
+  ask: number;
+  bid: number;
+};
+
+const redis = new Redis(process.env.REDIS_URL);
+const prices = await createMobxDistributedMap<Tick>("prices", {
+  client: redis,
+});
+
+const stop = autorun(() => {
+  console.log("XAUUSD.m", prices.get("XAUUSD.m"));
+});
+
+prices.set("XAUUSD.m", {
+  time: Date.now(),
+  ask: 3400.12,
+  bid: 3399.98,
+});
+
+stop();
+await prices.flush();
+await prices.destroy();
+await redis.quit();
+```
+
+The returned object has the same `DistributedMap<T>` API. Its reads participate
+in MobX tracking, local writes react immediately, and every received Redis patch
+is applied inside one MobX action. Values are observed shallowly, so replacing a
+quote triggers reactions without recursively turning the quote itself into a
+MobX observable.
+
+The normal `redis-dist-map` entry point never imports MobX. It remains an
+optional peer dependency, so projects using only the core map do not need to
+install it.
 
 ### Lifecycle
 

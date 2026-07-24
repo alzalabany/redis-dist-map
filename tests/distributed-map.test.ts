@@ -2,12 +2,14 @@ import { once } from "node:events";
 import { createServer } from "node:net";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Redis } from "ioredis";
+import { autorun, isObservable } from "mobx";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createDistributedMap,
   type DistributedMap,
   type DistributedMapOptions,
 } from "../src/index.js";
+import { createMobxDistributedMap } from "../src/mobx.js";
 
 let server: ChildProcessWithoutNullStreams;
 let client: Redis;
@@ -247,6 +249,89 @@ describe("createDistributedMap", () => {
     expect(() => map.set("safe", 1)).not.toThrow();
     expect(errors).toHaveLength(1);
     expect(errors[0]).toEqual(new Error("listener failed"));
+  });
+
+  it("provides MobX-tracked reads and batches each remote patch", async () => {
+    const writer = await makeMap<number>("test:mobx", {
+      flushIntervalMs: 10_000,
+    });
+    const reader = await createMobxDistributedMap<number>("test:mobx", {
+      client,
+      blockTimeoutMs: 50,
+    });
+    maps.push(reader as DistributedMap<unknown>);
+    const snapshots: Array<[number | undefined, number | undefined]> = [];
+    const stop = autorun(() => {
+      snapshots.push([reader.get("a"), reader.get("b")]);
+    });
+
+    expect(snapshots).toEqual([[undefined, undefined]]);
+    writer.set("a", 1);
+    writer.set("b", 2);
+    await writer.flush();
+    await waitFor(() => snapshots.length === 2);
+    expect(snapshots).toEqual([
+      [undefined, undefined],
+      [1, 2],
+    ]);
+
+    reader.set("a", 3);
+    expect(snapshots.at(-1)).toEqual([3, 2]);
+    stop();
+
+    expect(reader.name).toBe("test:mobx");
+    expect(reader.size).toBe(2);
+    expect(reader.has("a")).toBe(true);
+    expect([...reader.entries()]).toEqual([
+      ["a", 3],
+      ["b", 2],
+    ]);
+    expect([...reader.keys()]).toEqual(["a", "b"]);
+    expect([...reader.values()]).toEqual([3, 2]);
+    expect([...reader]).toEqual([
+      ["a", 3],
+      ["b", 2],
+    ]);
+    const visited: string[] = [];
+    reader.forEach((value, key) => visited.push(`${key}:${value}`));
+    expect(visited).toEqual(["a:3", "b:2"]);
+
+    const changes: string[] = [];
+    const unsubscribeGlobal = reader.onChange((change) => {
+      changes.push(`all:${change.key}:${change.operation}`);
+    });
+    const unsubscribeKey = reader.onChange("c", (_value, change) => {
+      changes.push(`key:${change.key}:${change.operation}`);
+    });
+    reader.set("c", 4);
+    expect(reader.delete("c")).toBe(true);
+    expect(changes).toEqual([
+      "all:c:set",
+      "key:c:set",
+      "all:c:delete",
+      "key:c:delete",
+    ]);
+    unsubscribeGlobal();
+    unsubscribeKey();
+    expect(() =>
+      Reflect.apply(reader.onChange, reader, ["missing-listener"]),
+    ).toThrow("A key change listener is required");
+
+    reader.clear();
+    expect(reader.size).toBe(0);
+    await reader.flush();
+    await client.hset("test:mobx", "recovered", JSON.stringify(5));
+    await reader.synchronize();
+    expect(reader.get("recovered")).toBe(5);
+
+    const quotes = await createMobxDistributedMap<{ bid: number }>(
+      "test:mobx-shallow",
+      { client, blockTimeoutMs: 50 },
+    );
+    maps.push(quotes as DistributedMap<unknown>);
+    quotes.set("XAUUSD.m", { bid: 3_400 });
+    expect(isObservable(quotes.get("XAUUSD.m"))).toBe(false);
+    await quotes.destroy();
   });
 
   it("keeps pending local state over older remote updates", async () => {

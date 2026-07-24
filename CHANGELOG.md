@@ -16,4 +16,5 @@ follows [Semantic Versioning](https://semver.org/).
 - Cross-process synchronization for set, delete, and clear operations.
 - Periodic snapshot reloads and automatic recovery after trimmed or malformed events.
 - Custom serialization and error reporting hooks.
+- Optional shallow MobX adapter with action-batched remote patches.
 - Dual ESM/CommonJS package output with TypeScript declarations.
