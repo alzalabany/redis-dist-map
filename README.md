@@ -33,6 +33,10 @@ const flags = await createDistributedMap<boolean>("feature-flags", {
   client: redis,
 });
 
+const unsubscribe = flags.onChange("new-checkout", (enabled, change) => {
+  console.log(enabled, change.source);
+});
+
 flags.set("new-checkout", true);
 
 // Reads and writes touch local memory immediately.
@@ -41,6 +45,7 @@ console.log(flags.size);                // 1
 
 // Establish an explicit durability boundary before shutdown.
 await flags.flush();
+unsubscribe();
 await flags.destroy();
 await redis.quit();
 ```
@@ -88,6 +93,8 @@ retention window.
 - Updates to the same key inside one window are coalesced to the latest value.
 - Other healthy instances normally converge within the flush interval plus
   Redis/network latency.
+- Change listeners fire immediately for local mutations and after application
+  for remote or snapshot-recovery mutations.
 - Events are applied in Redis Stream ID order and duplicate events are ignored.
 - Periodic `synchronize()` calls reload the authoritative Hash after trimmed gaps.
 - An abrupt process crash can lose up to one flush window of local mutations.
@@ -123,6 +130,16 @@ type DistributedMapOptions<T> = {
 };
 ```
 
+```ts
+type DistributedMapChange<T> = {
+  key: string;
+  operation: "set" | "delete";
+  value: T | undefined;
+  previousValue: T | undefined;
+  source: "local" | "remote" | "synchronize";
+};
+```
+
 JSON is used by default. Bring your own codec for values such as `Date`, `BigInt`,
 or binary data:
 
@@ -155,6 +172,37 @@ next buffer.
 ```ts
 await prices.flush();
 ```
+
+### `onChange()`
+
+Subscribe to one key:
+
+```ts
+const unsubscribe = prices.onChange("XAUUSD.m", (tick, change) => {
+  if (change.operation === "delete") {
+    console.log("XAUUSD.m was removed");
+    return;
+  }
+
+  console.log("New tick", tick, change.source);
+});
+
+// Safe to call more than once.
+unsubscribe();
+```
+
+Or observe every key:
+
+```ts
+const unsubscribe = prices.onChange((change) => {
+  console.log(change.key, change.value, change.source);
+});
+```
+
+Subscriptions do not emit an initial value; call `get()` or iterate the map for
+the initial snapshot. A listener fires only when the serialized value changes
+or an existing key is deleted. Listener exceptions are isolated and forwarded
+to `onError`.
 
 ### Lifecycle
 

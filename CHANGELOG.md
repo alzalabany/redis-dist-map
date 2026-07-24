@@ -10,6 +10,7 @@ follows [Semantic Versioning](https://semver.org/).
 - Synchronous local reads and writes with a familiar JavaScript `Map` interface.
 - A 50ms write-behind buffer that coalesces repeated mutations by key.
 - Explicit `flush()` durability boundaries and serialized batch persistence.
+- Global and key-specific change subscriptions with source metadata.
 - Atomic Redis Hash patches and Redis Stream events.
 - Ten-second time-based Stream retention using `XADD MINID`.
 - Cross-process synchronization for set, delete, and clear operations.

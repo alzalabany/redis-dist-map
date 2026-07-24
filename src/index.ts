@@ -24,6 +24,28 @@ export interface DistributedMapOptions<T> {
   onError?: (error: unknown) => void;
 }
 
+export type DistributedMapChangeSource =
+  | "local"
+  | "remote"
+  | "synchronize";
+
+export interface DistributedMapChange<T> {
+  readonly key: string;
+  readonly operation: "set" | "delete";
+  readonly value: T | undefined;
+  readonly previousValue: T | undefined;
+  readonly source: DistributedMapChangeSource;
+}
+
+export type DistributedMapChangeListener<T> = (
+  change: DistributedMapChange<T>,
+) => void;
+
+export type DistributedMapKeyChangeListener<T> = (
+  value: T | undefined,
+  change: DistributedMapChange<T>,
+) => void;
+
 /**
  * A local Map-like view that stays synchronized through Redis.
  *
@@ -42,6 +64,10 @@ export interface DistributedMap<T> extends Iterable<[string, T]> {
   set(key: string, value: T): void;
   delete(key: string): boolean;
   clear(): void;
+  /** Subscribes to changes for every key. Returns an idempotent unsubscribe function. */
+  onChange(listener: DistributedMapChangeListener<T>): () => void;
+  /** Subscribes to changes for one key. Returns an idempotent unsubscribe function. */
+  onChange(key: string, listener: DistributedMapKeyChangeListener<T>): () => void;
   /** Persists and broadcasts every mutation queued before this call. */
   flush(): Promise<void>;
   /** Reloads an authoritative snapshot from Redis. */
@@ -178,7 +204,13 @@ function parseStreamPatch(value: string): StreamPatch {
 
 class RedisDistributedMap<T> implements DistributedMap<T> {
   private readonly cache = new Map<string, T>();
+  private readonly serializedCache = new Map<string, string>();
   private readonly pending = new Map<string, PendingMutation<T>>();
+  private readonly listeners = new Set<DistributedMapChangeListener<T>>();
+  private readonly keyListeners = new Map<
+    string,
+    Set<DistributedMapKeyChangeListener<T>>
+  >();
   private readonly streamKey: string;
   private readonly subscriber: Redis;
   private readonly serialize: (value: T) => string;
@@ -223,8 +255,8 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
 
   async initialize(): Promise<void> {
     try {
-      const { cursor, values } = await this.loadSnapshot();
-      this.replaceCache(values, cursor);
+      const { cursor, values, serializedValues } = await this.loadSnapshot();
+      this.replaceCache(values, serializedValues, cursor);
       this.lastReadId = cursor;
       this.listenerPromise = this.listenForUpdates();
       this.synchronizeTimer = setInterval(() => {
@@ -271,36 +303,104 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
     return this.entries();
   }
 
+  onChange(listener: DistributedMapChangeListener<T>): () => void;
+  onChange(
+    key: string,
+    listener: DistributedMapKeyChangeListener<T>,
+  ): () => void;
+  onChange(
+    keyOrListener: string | DistributedMapChangeListener<T>,
+    keyListener?: DistributedMapKeyChangeListener<T>,
+  ): () => void {
+    this.assertRunning();
+
+    if (typeof keyOrListener === "function") {
+      const listener = keyOrListener;
+      this.listeners.add(listener);
+      return this.createUnsubscribe(() => {
+        this.listeners.delete(listener);
+      });
+    }
+
+    if (keyListener === undefined) {
+      throw new TypeError("A key change listener is required");
+    }
+    const key = keyOrListener;
+    const listeners =
+      this.keyListeners.get(key) ??
+      new Set<DistributedMapKeyChangeListener<T>>();
+    listeners.add(keyListener);
+    this.keyListeners.set(key, listeners);
+    return this.createUnsubscribe(() => {
+      listeners.delete(keyListener);
+      if (listeners.size === 0) this.keyListeners.delete(key);
+    });
+  }
+
   set(key: string, value: T): void {
     this.assertRunning();
     const serialized = this.serialize(value);
     const revision = ++this.revision;
+    const previousValue = this.cache.get(key);
+    const changed = this.serializedCache.get(key) !== serialized;
     this.cache.set(key, value);
+    this.serializedCache.set(key, serialized);
     this.pending.set(key, {
       operation: "set",
       value,
       serialized,
       revision,
     });
+    if (changed) {
+      this.emitChange({
+        key,
+        operation: "set",
+        value,
+        previousValue,
+        source: "local",
+      });
+    }
     this.scheduleFlush();
   }
 
   delete(key: string): boolean {
     this.assertRunning();
+    const previousValue = this.cache.get(key);
     const deleted = this.cache.delete(key);
+    this.serializedCache.delete(key);
     this.pending.set(key, {
       operation: "delete",
       revision: ++this.revision,
     });
+    if (deleted) {
+      this.emitChange({
+        key,
+        operation: "delete",
+        value: undefined,
+        previousValue,
+        source: "local",
+      });
+    }
     this.scheduleFlush();
     return deleted;
   }
 
   clear(): void {
     this.assertRunning();
+    const previousValues = new Map(this.cache);
     this.cache.clear();
+    this.serializedCache.clear();
     this.pending.clear();
     this.pendingClearRevision = ++this.revision;
+    for (const [key, previousValue] of previousValues) {
+      this.emitChange({
+        key,
+        operation: "delete",
+        value: undefined,
+        previousValue,
+        source: "local",
+      });
+    }
     this.scheduleFlush();
   }
 
@@ -317,10 +417,10 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
 
   async synchronize(): Promise<void> {
     this.assertRunning();
-    const { cursor, values } = await this.loadSnapshot();
+    const { cursor, values, serializedValues } = await this.loadSnapshot();
 
     if (compareStreamIds(cursor, this.lastAppliedId) >= 0) {
-      this.replaceCache(values, cursor);
+      this.replaceCache(values, serializedValues, cursor, "synchronize");
     }
   }
 
@@ -334,6 +434,8 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
       this.synchronizeTimer = undefined;
     }
     this.subscriber.disconnect();
+    this.listeners.clear();
+    this.keyListeners.clear();
     this.destroyPromise = Promise.all([
       this.listenerPromise,
       this.flushChain,
@@ -444,6 +546,7 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
   private async loadSnapshot(): Promise<{
     cursor: string;
     values: Map<string, T>;
+    serializedValues: Map<string, string>;
   }> {
     const results = await this.client
       .multi()
@@ -472,13 +575,15 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
     }
 
     const values = new Map<string, T>();
+    const serializedValues = new Map<string, string>();
     for (const [key, serialized] of Object.entries(hash)) {
       if (typeof serialized !== "string") {
         throw new Error(`Redis hash value for ${key} is not a string`);
       }
       values.set(key, this.deserialize(serialized));
+      serializedValues.set(key, serialized);
     }
-    return { cursor, values };
+    return { cursor, values, serializedValues };
   }
 
   private async listenForUpdates(): Promise<void> {
@@ -520,6 +625,8 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
   private applyStreamEvent(id: string, fields: string[]): void {
     if (compareStreamIds(id, this.lastAppliedId) <= 0) return;
 
+    const previousValues = new Map(this.cache);
+    const previousSerialized = new Map(this.serializedCache);
     const event = streamFieldsToRecord(fields);
     const operation = event.operation ?? (event.value === "" ? "delete" : "set");
 
@@ -530,33 +637,46 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
       this.applyPatch(parseStreamPatch(event.patch));
     } else if (operation === "clear") {
       this.cache.clear();
+      this.serializedCache.clear();
       this.applyPendingOverlay();
     } else if (operation === "delete") {
       if (event.key === undefined) throw new Error("Delete event has no key");
-      if (!this.isLocallyShadowed(event.key)) this.cache.delete(event.key);
+      if (!this.isLocallyShadowed(event.key)) {
+        this.cache.delete(event.key);
+        this.serializedCache.delete(event.key);
+      }
     } else if (operation === "set") {
       if (event.key === undefined || event.value === undefined) {
         throw new Error("Set event has no key or value");
       }
       if (!this.isLocallyShadowed(event.key)) {
         this.cache.set(event.key, this.deserialize(event.value));
+        this.serializedCache.set(event.key, event.value);
       }
     } else {
       throw new Error(`Unknown distributed map operation: ${operation}`);
     }
 
     this.lastAppliedId = id;
+    this.emitCacheDiff(previousValues, previousSerialized, "remote");
   }
 
   private applyPatch(patch: StreamPatch): void {
-    if (patch.clear) this.cache.clear();
+    if (patch.clear) {
+      this.cache.clear();
+      this.serializedCache.clear();
+    }
 
     for (const key of patch.deletes) {
-      if (!this.isLocallyShadowed(key)) this.cache.delete(key);
+      if (!this.isLocallyShadowed(key)) {
+        this.cache.delete(key);
+        this.serializedCache.delete(key);
+      }
     }
     for (const [key, serialized] of patch.sets) {
       if (!this.isLocallyShadowed(key)) {
         this.cache.set(key, this.deserialize(serialized));
+        this.serializedCache.set(key, serialized);
       }
     }
     if (patch.clear) this.applyPendingOverlay();
@@ -567,12 +687,17 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
   }
 
   private applyPendingOverlay(): void {
-    if (this.pendingClearRevision !== undefined) this.cache.clear();
+    if (this.pendingClearRevision !== undefined) {
+      this.cache.clear();
+      this.serializedCache.clear();
+    }
     for (const [key, mutation] of this.pending) {
       if (mutation.operation === "set") {
         this.cache.set(key, mutation.value);
+        this.serializedCache.set(key, mutation.serialized);
       } else {
         this.cache.delete(key);
+        this.serializedCache.delete(key);
       }
     }
   }
@@ -582,11 +707,93 @@ class RedisDistributedMap<T> implements DistributedMap<T> {
     this.lastAppliedId = id;
   }
 
-  private replaceCache(values: Map<string, T>, cursor: string): void {
+  private replaceCache(
+    values: Map<string, T>,
+    serializedValues: Map<string, string>,
+    cursor: string,
+    source?: DistributedMapChangeSource,
+  ): void {
+    const previousValues = source === undefined ? undefined : new Map(this.cache);
+    const previousSerialized =
+      source === undefined ? undefined : new Map(this.serializedCache);
     this.cache.clear();
+    this.serializedCache.clear();
     for (const [key, value] of values) this.cache.set(key, value);
+    for (const [key, value] of serializedValues) {
+      this.serializedCache.set(key, value);
+    }
     this.applyPendingOverlay();
     this.lastAppliedId = cursor;
+    if (
+      source !== undefined &&
+      previousValues !== undefined &&
+      previousSerialized !== undefined
+    ) {
+      this.emitCacheDiff(previousValues, previousSerialized, source);
+    }
+  }
+
+  private emitCacheDiff(
+    previousValues: Map<string, T>,
+    previousSerialized: Map<string, string>,
+    source: DistributedMapChangeSource,
+  ): void {
+    const keys = new Set([...previousValues.keys(), ...this.cache.keys()]);
+    for (const key of keys) {
+      const existed = previousValues.has(key);
+      const exists = this.cache.has(key);
+      if (!exists) {
+        if (existed) {
+          this.emitChange({
+            key,
+            operation: "delete",
+            value: undefined,
+            previousValue: previousValues.get(key),
+            source,
+          });
+        }
+        continue;
+      }
+
+      if (
+        !existed ||
+        previousSerialized.get(key) !== this.serializedCache.get(key)
+      ) {
+        this.emitChange({
+          key,
+          operation: "set",
+          value: this.cache.get(key),
+          previousValue: previousValues.get(key),
+          source,
+        });
+      }
+    }
+  }
+
+  private emitChange(change: DistributedMapChange<T>): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(change);
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
+    for (const listener of [...(this.keyListeners.get(change.key) ?? [])]) {
+      try {
+        listener(change.value, change);
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
+  }
+
+  private createUnsubscribe(remove: () => void): () => void {
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      remove();
+    };
   }
 
   private reportError(error: unknown): void {

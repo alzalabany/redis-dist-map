@@ -179,7 +179,7 @@
       <section class="section quick-start" id="start">
         <div class="code-intro">
           <span class="index">02 / START</span>
-          <h2>Distributed state<br />in <span>nine lines.</span></h2>
+          <h2>Reactive state<br />without <span>polling.</span></h2>
           <p>
             Bring an ioredis client. Pick a namespaced key. The first snapshot
             and background listener are ready when the promise resolves.
@@ -187,7 +187,7 @@
           <ul>
             <li><span>✓</span> ESM and CommonJS</li>
             <li><span>✓</span> TypeScript declarations included</li>
-            <li><span>✓</span> 50ms coalesced patches</li>
+            <li><span>✓</span> Reactive key subscriptions</li>
           </ul>
         </div>
         <div class="code-window">
@@ -205,6 +205,10 @@
 <span class="kw">const</span> flags = <span class="kw">await</span> <span class="fn">createDistributedMap</span>&lt;<span class="type">boolean</span>&gt;(
   <span class="str">"app:prod:flags"</span>,
   { client: redis },
+);
+
+flags.<span class="fn">onChange</span>(<span class="str">"new-checkout"</span>, (enabled) =&gt;
+  console.<span class="fn">log</span>(enabled)
 );
 
 flags.<span class="fn">set</span>(<span class="str">"new-checkout"</span>, <span class="bool">true</span>);
@@ -228,7 +232,7 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
         </div>
         <div class="api-grid">
           <div class="api-item"><code>.get(key)</code><span>→ T | undefined</span><p>Read from the local cache.</p></div>
-          <div class="api-item"><code>.has(key)</code><span>→ boolean</span><p>Check the local cache.</p></div>
+          <div class="api-item"><code>.onChange(key, fn)</code><span>→ unsubscribe()</span><p>React to local and remote changes.</p></div>
           <div class="api-item"><code>.set(key, value)</code><span>→ void</span><p>Update locally and queue a value.</p></div>
           <div class="api-item"><code>.delete(key)</code><span>→ boolean</span><p>Delete locally and queue the key.</p></div>
           <div class="api-item"><code>.clear()</code><span>→ void</span><p>Clear locally and queue the reset.</p></div>

@@ -172,6 +172,83 @@ describe("createDistributedMap", () => {
     await waitFor(() => first.size === 0);
   });
 
+  it("notifies global and key listeners for local, remote, and repaired changes", async () => {
+    const writer = await makeMap<number>("test:change-listeners", {
+      flushIntervalMs: 10_000,
+    });
+    const reader = await makeMap<number>("test:change-listeners");
+    const localValues: Array<number | undefined> = [];
+    const keyChanges: Array<{
+      value: number | undefined;
+      previousValue: number | undefined;
+      source: string;
+    }> = [];
+    const globalKeys: string[] = [];
+
+    const unsubscribeLocal = writer.onChange("price", (value, change) => {
+      expect(change.operation).toBe("set");
+      localValues.push(value);
+    });
+    const unsubscribeKey = reader.onChange("price", (value, change) => {
+      keyChanges.push({
+        value,
+        previousValue: change.previousValue,
+        source: change.source,
+      });
+    });
+    const unsubscribeGlobal = reader.onChange((change) => {
+      globalKeys.push(change.key);
+    });
+
+    writer.set("price", 1);
+    writer.set("price", 2);
+    writer.set("price", 2);
+    expect(localValues).toEqual([1, 2]);
+
+    await writer.flush();
+    await waitFor(() => keyChanges.length === 1);
+    expect(keyChanges[0]).toEqual({
+      value: 2,
+      previousValue: undefined,
+      source: "remote",
+    });
+    expect(globalKeys).toEqual(["price"]);
+
+    await client.hset("test:change-listeners", "price", JSON.stringify(3));
+    await reader.synchronize();
+    expect(keyChanges[1]).toEqual({
+      value: 3,
+      previousValue: 2,
+      source: "synchronize",
+    });
+
+    unsubscribeLocal();
+    unsubscribeKey();
+    unsubscribeKey();
+    unsubscribeGlobal();
+
+    writer.set("price", 4);
+    await writer.flush();
+    await waitFor(() => reader.get("price") === 4);
+    expect(localValues).toEqual([1, 2]);
+    expect(keyChanges).toHaveLength(2);
+    expect(globalKeys).toEqual(["price", "price"]);
+  });
+
+  it("isolates listener failures through onError", async () => {
+    const errors: unknown[] = [];
+    const map = await makeMap<number>("test:listener-errors", {
+      onError: (error) => errors.push(error),
+    });
+    map.onChange(() => {
+      throw new Error("listener failed");
+    });
+
+    expect(() => map.set("safe", 1)).not.toThrow();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toEqual(new Error("listener failed"));
+  });
+
   it("keeps pending local state over older remote updates", async () => {
     const map = await makeMap<number>("test:local-overlay", {
       flushIntervalMs: 10_000,
