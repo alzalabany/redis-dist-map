@@ -115,6 +115,7 @@
         <div>
           <span>SYNC READS</span><i>◆</i>
           <span>BATCHED WRITES</span><i>◆</i>
+          <span>WRITER-ONLY MODE</span><i>◆</i>
           <span>ORDERED EVENTS</span><i>◆</i>
           <span>FULLY TYPED</span><i>◆</i>
           <span>OPTIONAL MOBX ADAPTER</span>
@@ -188,6 +189,7 @@
             <li><span>✓</span> ESM and CommonJS</li>
             <li><span>✓</span> TypeScript declarations included</li>
             <li><span>✓</span> Reactive key subscriptions</li>
+            <li><span>✓</span> No-sync writer-only mode</li>
             <li><span>✓</span> Optional shallow MobX adapter</li>
           </ul>
         </div>
@@ -240,6 +242,7 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
           <div class="api-item"><code>.flush()</code><span>→ Promise&lt;void&gt;</span><p>Persist and broadcast pending changes.</p></div>
           <div class="api-item"><code>.synchronize()</code><span>→ Promise&lt;void&gt;</span><p>Reload the Redis snapshot.</p></div>
           <div class="api-item"><code>.destroy()</code><span>→ Promise&lt;void&gt;</span><p>Stop listening and clean up.</p></div>
+          <div class="api-item"><code>createDistributedMapWriter()</code><span>→ writer</span><p>Publish without a snapshot or XREAD connection.</p></div>
           <div class="api-item"><code>redis-dist-map/mobx</code><span>→ optional</span><p>MobX-tracked reads and batched reactions.</p></div>
         </div>
       </section>

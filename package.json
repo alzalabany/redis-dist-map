@@ -1,6 +1,6 @@
 {
   "name": "redis-dist-map",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A tiny, typed, self-synchronizing distributed Map backed by Redis.",
   "keywords": [
     "redis",
@@ -13,7 +13,9 @@
     "sync",
     "mobx",
     "observable",
-    "reactive"
+    "reactive",
+    "publisher",
+    "writer"
   ],
   "homepage": "https://alzalabany.github.io/redis-dist-map/",
   "bugs": {

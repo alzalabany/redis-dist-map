@@ -70,6 +70,7 @@ need fast local access and Redis is the source of truth.
 ```mermaid
 flowchart LR
   A["Node A<br/>local Map"] -->|"coalesced patch<br/>every ≤50ms"| W["write-behind<br/>buffer"]
+  P["Ingestor<br/>writer only"] -->|"no reads or sync"| W
   W -->|"HSET + XADD<br/>(atomic transaction)"| R[("Redis<br/>Hash + Stream")]
   B["Node B<br/>local Map"] -->|"XREAD"| R
   R -->|"ordered events"| B
@@ -78,8 +79,8 @@ flowchart LR
 
 Local mutations are coalesced by key for up to `flushIntervalMs` and persisted
 as one patch. The patch updates the Redis Hash and appends a Redis Stream event
-in one transaction. Every instance keeps a blocking stream reader on a
-duplicated ioredis connection.
+in one transaction. Every readable map keeps a blocking stream reader on a
+duplicated ioredis connection; write-only publishers skip that work entirely.
 
 The Stream retains ten seconds of patches by default using `XADD MINID`.
 Periodic Hash snapshots repair replicas that were offline longer than the
@@ -114,7 +115,7 @@ MobX is optional and only needed when importing `redis-dist-map/mobx`.
 Install a specific GitHub release without using the npm registry:
 
 ```bash
-npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.1.0
+npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.2.0
 ```
 
 Git installs build the package locally during installation. Add `ioredis` to
@@ -160,6 +161,47 @@ const deadlines = await createDistributedMap<Date>("deadlines", {
   deserialize: (value) => new Date(value),
 });
 ```
+
+### `createDistributedMapWriter(name, options)`
+
+Creates a synchronous, write-only publisher for processes that ingest data but
+never read it:
+
+```ts
+import Redis from "ioredis";
+import { createDistributedMapWriter } from "redis-dist-map";
+
+const redis = new Redis(process.env.REDIS_URL);
+const writer = createDistributedMapWriter<Tick>("prices", {
+  client: redis,
+  flushIntervalMs: 50,
+});
+
+writer.set("XAUUSD.m", tick);
+
+await writer.flush();
+await writer.destroy();
+await redis.quit();
+```
+
+The writer opens no duplicated connection, loads no Hash snapshot, keeps no
+local readable Map, and receives no Redis Stream traffic. It retains the same
+write coalescing, atomic Hash + Stream transaction, retention, custom
+serialization, automatic flushing, and explicit `flush()` durability boundary.
+
+```ts
+type DistributedMapWriterOptions<T> = {
+  client: Redis;
+  serialize?: (value: T) => string;
+  flushIntervalMs?: number; // default: 50
+  historyMs?: number;       // default: 10_000
+  onError?: (error: unknown) => void;
+};
+```
+
+Its deliberately small API is `set`, `delete`, `clear`, `flush`, and `destroy`.
+`delete()` returns `void`: without loading remote state, a writer cannot know
+whether the key previously existed.
 
 ### `set`, `delete`, and `clear`
 
@@ -286,7 +328,8 @@ process.once("SIGTERM", async () => {
 - Stream patches are trimmed by age on every flush. During a completely idle
   period, the last retained patch remains until another flush performs trimming.
 - The default 50ms buffer emits at most 20 transactions per second per active
-  map, regardless of how many same-key updates are coalesced inside each window.
+  map or writer, regardless of how many same-key updates are coalesced inside
+  each window.
 - `historyMs` uses the local clock to derive Redis Stream ID cutoffs; keep
   application and Redis host clocks synchronized.
 - Values must serialize to a string. Default JSON serialization rejects

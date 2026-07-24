@@ -3,11 +3,13 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Redis } from "ioredis";
 import { autorun, isObservable } from "mobx";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDistributedMap,
+  createDistributedMapWriter,
   type DistributedMap,
   type DistributedMapOptions,
+  type DistributedMapWriter,
 } from "../src/index.js";
 import { createMobxDistributedMap } from "../src/mobx.js";
 
@@ -15,6 +17,7 @@ let server: ChildProcessWithoutNullStreams;
 let client: Redis;
 let port: number;
 const maps: DistributedMap<unknown>[] = [];
+const writers: DistributedMapWriter<unknown>[] = [];
 
 async function freePort(): Promise<number> {
   const socket = createServer();
@@ -87,7 +90,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await Promise.all(maps.map((map) => map.destroy()));
+  await Promise.all([
+    ...maps.map((map) => map.destroy()),
+    ...writers.map((writer) => writer.destroy()),
+  ]);
   if (client) await client.quit();
   if (server && !server.killed) {
     server.kill("SIGTERM");
@@ -96,6 +102,66 @@ afterAll(async () => {
 });
 
 describe("createDistributedMap", () => {
+  it("publishes through a writer without loading or subscribing", async () => {
+    const duplicate = vi.spyOn(client, "duplicate");
+    const multi = vi.spyOn(client, "multi");
+    const writer = createDistributedMapWriter<number>("test:writer", {
+      client,
+      flushIntervalMs: 10_000,
+    });
+    writers.push(writer as DistributedMapWriter<unknown>);
+
+    expect(duplicate).not.toHaveBeenCalled();
+    expect(multi).not.toHaveBeenCalled();
+    expect("get" in writer).toBe(false);
+    expect("size" in writer).toBe(false);
+    duplicate.mockRestore();
+    multi.mockRestore();
+
+    const reader = await makeMap<number>("test:writer");
+    writer.set("price", 1);
+    writer.set("price", 2);
+    writer.set("volume", 3);
+    await writer.flush();
+
+    await waitFor(() => reader.get("price") === 2);
+    expect(reader.get("volume")).toBe(3);
+    expect(await client.hgetall("test:writer")).toEqual({
+      price: "2",
+      volume: "3",
+    });
+    expect(await client.xlen("test:writer:stream")).toBe(1);
+
+    expect(writer.delete("price")).toBeUndefined();
+    await writer.flush();
+    await waitFor(() => !reader.has("price"));
+
+    writer.clear();
+    writer.set("ready", 4);
+    await writer.flush();
+    await waitFor(() => reader.size === 1 && reader.get("ready") === 4);
+  });
+
+  it("does not flush pending writer mutations during destroy", async () => {
+    const writer = createDistributedMapWriter<number>(
+      "test:writer-destroy",
+      {
+        client,
+        flushIntervalMs: 10_000,
+      },
+    );
+    writers.push(writer as DistributedMapWriter<unknown>);
+
+    writer.set("local-only", 1);
+    await writer.destroy();
+
+    expect(
+      await client.hget("test:writer-destroy", "local-only"),
+    ).toBeNull();
+    expect(() => writer.set("nope", 2)).toThrow("is destroyed");
+    await expect(writer.flush()).rejects.toThrow("is destroyed");
+  });
+
   it("behaves like a synchronous Map for reads and iteration", async () => {
     const map = await makeMap<{ score: number }>("test:map-interface");
 
@@ -495,6 +561,25 @@ describe("createDistributedMap", () => {
   });
 
   it("validates options and rejects writes after destroy", async () => {
+    expect(() =>
+      createDistributedMapWriter("", { client }),
+    ).toThrow("name cannot be empty");
+    expect(() =>
+      createDistributedMapWriter("test:writer-no-client", undefined as never),
+    ).toThrow("Redis client is required");
+    expect(() =>
+      createDistributedMapWriter("test:writer-flush-timeout", {
+        client,
+        flushIntervalMs: 0,
+      }),
+    ).toThrow("flushIntervalMs");
+    expect(() =>
+      createDistributedMapWriter("test:writer-history", {
+        client,
+        historyMs: 0,
+      }),
+    ).toThrow("historyMs");
+
     await expect(
       createDistributedMap("test:no-client", undefined as never),
     ).rejects.toThrow("Redis client is required");

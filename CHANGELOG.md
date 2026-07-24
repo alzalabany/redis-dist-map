@@ -3,6 +3,17 @@
 All notable changes to this project will be documented here. This project
 follows [Semantic Versioning](https://semver.org/).
 
+## 0.2.0 — 2026-07-24
+
+### Added
+
+- A synchronous `createDistributedMapWriter()` publisher for write-only
+  processes.
+- Writer-side `set`, `delete`, `clear`, `flush`, and `destroy` operations using
+  the existing coalesced atomic Hash + Stream patch format.
+- Zero-I/O writer startup with no local snapshot, duplicated Redis connection,
+  XREAD loop, or synchronization timer.
+
 ## 0.1.0 — 2026-07-24
 
 ### Added
