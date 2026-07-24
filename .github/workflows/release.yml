@@ -1,24 +1,50 @@
-name: Publish package
+name: Create release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 24
+          cache: npm
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: npm ci
-      - run: npm publish --provenance
+
+      - name: Verify tag matches package version
+        id: version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "v${package_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version ${package_version}"
+            exit 1
+          fi
+          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
+
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Pack release artifact
+        run: npm pack --ignore-scripts
+
+      - name: Create GitHub release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "redis-dist-map-${{ steps.version.outputs.package_version }}.tgz" \
+            --verify-tag \
+            --generate-notes \
+            --title "redis-dist-map ${{ steps.version.outputs.package_version }}"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}

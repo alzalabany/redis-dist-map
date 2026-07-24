@@ -17,4 +17,5 @@ follows [Semantic Versioning](https://semver.org/).
 - Periodic snapshot reloads and automatic recovery after trimmed or malformed events.
 - Custom serialization and error reporting hooks.
 - Optional shallow MobX adapter with action-batched remote patches.
+- Versioned GitHub installs with automatic source builds and release artifacts.
 - Dual ESM/CommonJS package output with TypeScript declarations.

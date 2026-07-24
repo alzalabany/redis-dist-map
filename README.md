@@ -111,6 +111,15 @@ npm install redis-dist-map ioredis
 Requires Node.js 18+, ioredis 5+, and Redis 6.2+ (`XADD MINID`).
 MobX is optional and only needed when importing `redis-dist-map/mobx`.
 
+Install a specific GitHub release without using the npm registry:
+
+```bash
+npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.1.0
+```
+
+Git installs build the package locally during installation. Add `ioredis` to
+the consuming project, plus `mobx` when using the optional MobX adapter.
+
 ## API
 
 ### `createDistributedMap(name, options)`
