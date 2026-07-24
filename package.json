@@ -1,0 +1,71 @@
+{
+  "name": "redis-dist-map",
+  "version": "0.1.0",
+  "description": "A tiny, typed, self-synchronizing distributed Map backed by Redis.",
+  "keywords": [
+    "redis",
+    "distributed",
+    "map",
+    "cache",
+    "typescript",
+    "ioredis",
+    "stream",
+    "sync"
+  ],
+  "homepage": "https://alzalabany.github.io/redis-dist-map/",
+  "bugs": {
+    "url": "https://github.com/alzalabany/redis-dist-map/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alzalabany/redis-dist-map.git"
+  },
+  "license": "MIT",
+  "author": "alzalabany",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "prepack": "npm run check && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "ioredis": ">=5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "ioredis": "^5.6.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

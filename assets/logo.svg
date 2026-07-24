@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="180" viewBox="0 0 760 180" role="img" aria-labelledby="title desc">
+  <title id="title">redis-dist-map</title>
+  <desc id="desc">Three glowing map nodes linked around a Redis-inspired stack</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c1222"/>
+      <stop offset="1" stop-color="#111a32"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5277"/>
+      <stop offset="1" stop-color="#ff8a4c"/>
+    </linearGradient>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="760" height="180" rx="30" fill="url(#bg)"/>
+  <g transform="translate(48 30)">
+    <path d="M28 30 92 7l64 23-64 23zM28 56l64 23 64-23M28 82l64 23 64-23" fill="none" stroke="url(#hot)" stroke-width="7" stroke-linejoin="round"/>
+    <circle cx="20" cy="30" r="7" fill="#68e0cf" filter="url(#glow)"/>
+    <circle cx="164" cy="30" r="7" fill="#68e0cf" filter="url(#glow)"/>
+    <circle cx="92" cy="116" r="7" fill="#68e0cf" filter="url(#glow)"/>
+  </g>
+  <g fill="#f7f9ff">
+    <text x="245" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="45" font-weight="700" letter-spacing="-2">redis-dist-map</text>
+    <text x="248" y="122" font-family="ui-sans-serif, system-ui, sans-serif" font-size="17" fill="#9eabc7" letter-spacing="2.2">LOCAL SPEED · DISTRIBUTED STATE</text>
+  </g>
+</svg>

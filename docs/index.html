@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="redis-dist-map — a tiny, typed, self-synchronizing distributed Map backed by Redis."
+    />
+    <meta name="theme-color" content="#0a0d18" />
+    <meta property="og:title" content="redis-dist-map" />
+    <meta
+      property="og:description"
+      content="Local-speed reads. Distributed Redis-backed state."
+    />
+    <meta property="og:type" content="website" />
+    <title>redis-dist-map — local speed, distributed state</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="nav">
+      <a class="brand" href="#top" aria-label="redis-dist-map home">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i>
+        </span>
+        <span>redis-dist-map</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#how">How it works</a>
+        <a href="#api">API</a>
+        <a
+          class="github-link"
+          href="https://github.com/alzalabany/redis-dist-map"
+        >
+          GitHub
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M5 3h8v8h-2V6.4L4.4 13 3 11.6 9.6 5H5V3Z" />
+          </svg>
+        </a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="eyebrow reveal">
+          <span class="pulse"></span>
+          Redis-backed. Memory-fast.
+        </div>
+        <h1 class="reveal delay-1">
+          One map.<br />
+          <span>Every process.</span>
+        </h1>
+        <p class="hero-copy reveal delay-2">
+          A tiny TypeScript library that gives each Node.js process a fast local
+          <code>Map</code>—and keeps every copy synchronized through Redis.
+        </p>
+        <div class="hero-actions reveal delay-3">
+          <div class="install">
+            <span>$</span>
+            <code>npm i redis-dist-map ioredis</code>
+            <button type="button" data-copy="npm i redis-dist-map ioredis">
+              <span class="sr-only">Copy install command</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 8h11v11H8zM5 5h11v2H7v9H5z" />
+              </svg>
+            </button>
+          </div>
+          <a class="button" href="#start">Quick start</a>
+        </div>
+
+        <div class="network reveal delay-4" aria-label="Animated synchronization diagram">
+          <div class="grid-lines"></div>
+          <div class="node node-a">
+            <span class="status"></span>
+            <div><b>API · 01</b><small>local Map</small></div>
+            <em>42</em>
+          </div>
+          <div class="node node-b">
+            <span class="status"></span>
+            <div><b>WORKER · 02</b><small>local Map</small></div>
+            <em>42</em>
+          </div>
+          <div class="node node-c">
+            <span class="status"></span>
+            <div><b>EDGE · 03</b><small>local Map</small></div>
+            <em>42</em>
+          </div>
+          <svg class="connections" viewBox="0 0 1000 380" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M190 128 C 330 128, 340 190, 500 190" />
+            <path d="M810 128 C 670 128, 660 190, 500 190" />
+            <path d="M500 306 L500 190" />
+            <circle class="packet packet-1" r="5">
+              <animateMotion dur="2.4s" repeatCount="indefinite" path="M190 128 C 330 128, 340 190, 500 190" />
+            </circle>
+            <circle class="packet packet-2" r="5">
+              <animateMotion dur="2.4s" begin=".8s" repeatCount="indefinite" path="M500 190 C 660 190, 670 128, 810 128" />
+            </circle>
+            <circle class="packet packet-3" r="5">
+              <animateMotion dur="2.4s" begin="1.5s" repeatCount="indefinite" path="M500 190 L500 306" />
+            </circle>
+          </svg>
+          <div class="redis-core">
+            <div class="redis-stack"><i></i><i></i><i></i></div>
+            <b>REDIS</b>
+            <small>Hash + Stream</small>
+          </div>
+          <p>EVENT 18446744073709551615-0 <span>SYNCED</span></p>
+        </div>
+      </section>
+
+      <section class="ticker" aria-label="Highlights">
+        <div>
+          <span>SYNC READS</span><i>◆</i>
+          <span>ATOMIC WRITES</span><i>◆</i>
+          <span>ORDERED EVENTS</span><i>◆</i>
+          <span>FULLY TYPED</span><i>◆</i>
+          <span>ZERO RUNTIME DEPENDENCIES</span>
+        </div>
+      </section>
+
+      <section class="section" id="how">
+        <div class="section-heading">
+          <span class="index">01 / HOW</span>
+          <h2>Network on writes.<br /><span>Memory on reads.</span></h2>
+          <p>
+            Your hot path stays local. Redis handles durable state and ordered
+            change propagation behind a small, familiar interface.
+          </p>
+        </div>
+        <div class="features">
+          <article>
+            <span class="feature-number">01</span>
+            <div class="feature-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M5 21h6v6H5zM13 13h6v14h-6zM21 5h6v22h-6z" />
+              </svg>
+            </div>
+            <h3>Read at RAM speed</h3>
+            <p>
+              <code>get</code>, <code>has</code>, <code>size</code>, and
+              iteration are synchronous operations on an in-process Map.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number">02</span>
+            <div class="feature-icon coral">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="m7 16 6 6L26 9M4 4v24h24" />
+              </svg>
+            </div>
+            <h3>Commit atomically</h3>
+            <p>
+              Hash mutations and Stream events happen in one Redis transaction,
+              so state and its change log never drift.
+            </p>
+          </article>
+          <article>
+            <span class="feature-number">03</span>
+            <div class="feature-icon violet">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <circle cx="7" cy="16" r="3" />
+                <circle cx="25" cy="7" r="3" />
+                <circle cx="25" cy="25" r="3" />
+                <path d="m10 15 12-7M10 17l12 7" />
+              </svg>
+            </div>
+            <h3>Converge everywhere</h3>
+            <p>
+              Blocking Stream readers apply ordered events to every live
+              instance, while snapshots make recovery straightforward.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section quick-start" id="start">
+        <div class="code-intro">
+          <span class="index">02 / START</span>
+          <h2>Distributed state<br />in <span>nine lines.</span></h2>
+          <p>
+            Bring an ioredis client. Pick a namespaced key. The first snapshot
+            and background listener are ready when the promise resolves.
+          </p>
+          <ul>
+            <li><span>✓</span> ESM and CommonJS</li>
+            <li><span>✓</span> TypeScript declarations included</li>
+            <li><span>✓</span> Custom codecs supported</li>
+          </ul>
+        </div>
+        <div class="code-window">
+          <div class="window-bar">
+            <div><i></i><i></i><i></i></div>
+            <span>feature-flags.ts</span>
+            <button type="button" data-copy-target="quick-code">COPY</button>
+          </div>
+          <pre id="quick-code"><code><span class="kw">import</span> Redis <span class="kw">from</span> <span class="str">"ioredis"</span>;
+<span class="kw">import</span> { createDistributedMap } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> redis = <span class="kw">new</span> <span class="fn">Redis</span>(process.env.REDIS_URL);
+
+<span class="kw">const</span> flags = <span class="kw">await</span> <span class="fn">createDistributedMap</span>&lt;<span class="type">boolean</span>&gt;(
+  <span class="str">"app:prod:flags"</span>,
+  { client: redis },
+);
+
+<span class="kw">await</span> flags.<span class="fn">set</span>(<span class="str">"new-checkout"</span>, <span class="bool">true</span>);
+
+<span class="comment">// synchronous — no Redis round trip</span>
+flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <span class="comment">// true</span></code></pre>
+          <div class="window-status">
+            <span><i></i> TYPESCRIPT</span>
+            <span>UTF-8&nbsp;&nbsp; LN 15, COL 41</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section api" id="api">
+        <div class="section-heading compact">
+          <span class="index">03 / API</span>
+          <h2>Small surface.<br /><span>Familiar shape.</span></h2>
+        </div>
+        <div class="api-grid">
+          <div class="api-item"><code>.get(key)</code><span>→ T | undefined</span><p>Read from the local cache.</p></div>
+          <div class="api-item"><code>.has(key)</code><span>→ boolean</span><p>Check the local cache.</p></div>
+          <div class="api-item"><code>.set(key, value)</code><span>→ Promise&lt;void&gt;</span><p>Commit and broadcast a value.</p></div>
+          <div class="api-item"><code>.delete(key)</code><span>→ Promise&lt;boolean&gt;</span><p>Remove and broadcast a key.</p></div>
+          <div class="api-item"><code>.synchronize()</code><span>→ Promise&lt;void&gt;</span><p>Reload the Redis snapshot.</p></div>
+          <div class="api-item"><code>.destroy()</code><span>→ Promise&lt;void&gt;</span><p>Stop listening and clean up.</p></div>
+        </div>
+      </section>
+
+      <section class="cta">
+        <div>
+          <span class="index">READY?</span>
+          <h2>Keep your state<br /><span>close.</span></h2>
+          <p>One dependency. One familiar abstraction. Every process in sync.</p>
+          <div class="hero-actions">
+            <a class="button light" href="https://www.npmjs.com/package/redis-dist-map">View on npm</a>
+            <a class="text-link" href="https://github.com/alzalabany/redis-dist-map">Read the source →</a>
+          </div>
+        </div>
+        <div class="cta-mark" aria-hidden="true">
+          <i></i><i></i><i></i>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <a class="brand" href="#top">
+        <span class="brand-mark small" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>redis-dist-map</span>
+      </a>
+      <p>Built for fast systems and calm operators.</p>
+      <span>MIT · 2026</span>
+    </footer>
+
+    <div class="toast" role="status" aria-live="polite">Copied to clipboard</div>
+  </body>
+</html>

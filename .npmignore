@@ -1,0 +1,10 @@
+tests/
+docs/
+.github/
+coverage/
+vitest.config.ts
+tsup.config.ts
+tsconfig.json
+CONTRIBUTING.md
+SECURITY.md
+CHANGELOG.md
