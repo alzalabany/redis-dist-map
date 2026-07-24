@@ -65,6 +65,151 @@ It is a good fit for shared configuration, feature flags, presence metadata,
 market prices, lightweight registries, and high-frequency state where processes
 need fast local access and Redis is the source of truth.
 
+## Use case 1: live prices without Redis on every request
+
+When prices move 100 times a second, your system should not turn every update
+or customer read into another Redis round trip.
+
+Let one process absorb the firehose. Every API instance gets the latest price
+in its own memory and reads it synchronously.
+
+```ts
+type PriceTick = {
+  ask: number;
+  bid: number;
+  volume: number;
+};
+```
+
+### Server 1: absorb the market feed
+
+```ts
+import Redis from "ioredis";
+import { createDistributedMapWriter } from "redis-dist-map";
+
+const redis = new Redis(process.env.REDIS_URL);
+const writer = createDistributedMapWriter<PriceTick>("market:prices", {
+  client: redis,
+});
+
+marketFeed.on("tick", ({ symbol, ask, bid, volume }) => {
+  writer.set(symbol, { ask, bid, volume });
+});
+```
+
+The writer is built for the hot side of the system: no snapshot, no local read
+cache, and no Stream listener. Repeated updates for the same symbol collapse
+into the latest value and publish in one atomic Redis patch every 50ms by
+default.
+
+### Server 2: serve prices from memory
+
+```ts
+import Redis from "ioredis";
+import { createDistributedMap } from "redis-dist-map";
+
+const redis = new Redis(process.env.REDIS_URL);
+const tickers = await createDistributedMap<PriceTick>("market:prices", {
+  client: redis,
+});
+
+// Synchronous local read. XREAD keeps this Map current in the background.
+const latestAsk = tickers.get("AAPL")?.ask;
+```
+
+Server 2 loads the current Hash on startup, then applies incoming Stream patches
+automatically. Your pricing endpoint stays simple: `tickers.get(symbol)` is a
+local `Map` read, even while Server 1 keeps publishing the feed.
+
+**The payoff:** ingest once, fan out automatically, and keep Redis off the
+customer-facing hot path.
+
+## Use case 2: miss once, hit everywhere
+
+Put the same cache-aside route on every API instance. Whichever instance sees a
+key first loads it from the database and fills the cache. The other instances
+receive that response automatically and serve later requests from their own
+memory.
+
+```ts
+import { createDistributedMap } from "redis-dist-map";
+
+type TickerPage = {
+  title: string;
+  summary: string;
+};
+
+const tickerCache = await createDistributedMap<TickerPage>(
+  "cache:ticker-pages",
+  { client: redis },
+);
+
+app.get("/ticker/:name", async (request) => {
+  const { name } = request.params as { name: string };
+  const cached = tickerCache.get(name);
+
+  if (cached !== undefined) return cached;
+
+  const ticker = await db.getWikipage(name);
+  tickerCache.set(name, ticker);
+  return ticker;
+});
+```
+
+Imagine the first `/ticker/AAPL` request lands on API instance 1. It misses,
+loads the page, and calls `set`. The patch reaches instances 2 through N in the
+background. The next `/ticker/AAPL` request can land anywhere and return from a
+local `Map`—no database query and no Redis round trip on the request path.
+
+**The payoff:** your load balancer can send traffic anywhere while every
+instance benefits from work already done by another.
+
+This is a shared cache, not a distributed lock. Simultaneous requests for a
+brand-new key can still miss before the first value propagates; use single-flight
+or locking as well when duplicate cold loads must be prevented.
+
+Cache lifetime is application-controlled: refresh with `set` or invalidate with
+`delete`. `historyMs` trims Stream history; it is not a cache TTL.
+
+## Use case 3: one rate limit across every API instance
+
+Per-process counters break as soon as a load balancer sends the same user to a
+different server. A shared counter makes every API instance enforce the same
+limit without trying to synchronize an in-memory value.
+
+```ts
+import { createSharedCounter } from "redis-dist-map";
+
+const requests = createSharedCounter("rate-limit:api", {
+  client: redis,
+  ttlMs: 60_000,
+});
+
+app.use(async (req, res, next) => {
+  const userId = req.user.id;
+  const current = await requests.inc(userId);
+
+  if (current > 100) {
+    res.status(429).send({ error: "RATE_LIMITED", ok: false });
+    return;
+  }
+
+  next();
+});
+```
+
+Every `inc()` goes directly to Redis. A Lua script increments the user's key
+and starts its expiry together, so concurrent requests cannot lose increments
+or create a counter without a TTL. The window starts on the first request and
+later increments do not extend it.
+
+**The payoff:** request 101 is rejected no matter which API instance receives
+it.
+
+This is a fixed-window limiter. It is intentionally separate from the
+write-behind map: rate-limit decisions require an awaited, atomic Redis result
+on every request.
+
 ## How it works
 
 ```mermaid
@@ -115,13 +260,48 @@ MobX is optional and only needed when importing `redis-dist-map/mobx`.
 Install a specific GitHub release without using the npm registry:
 
 ```bash
-npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.2.0
+npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.3.0
 ```
 
 Git installs build the package locally during installation. Add `ioredis` to
 the consuming project, plus `mobx` when using the optional MobX adapter.
 
 ## API
+
+### `createSharedCounter(name, options)`
+
+Creates an atomic Redis-backed counter namespace. Increments go directly to
+Redis and are never buffered or served from local memory.
+
+```ts
+import { createSharedCounter } from "redis-dist-map";
+
+const attempts = createSharedCounter("rate-limit", {
+  client: redis,
+  ttlMs: 60_000,
+});
+
+const current = await attempts.inc(userId);
+if (current > 100) {
+  res.status(429).send({ error: "RATE_LIMITED", ok: false });
+}
+```
+
+When `ttlMs` is configured, the expiry starts atomically with the first
+increment and later increments do not extend it. Omit `ttlMs` for a persistent
+counter. Each logical key is stored as its own Redis string, so expiration is
+independent per user or resource.
+
+```ts
+type SharedCounterOptions = {
+  client: Redis;
+  ttlMs?: number;
+};
+```
+
+This is a fixed-window counter. Unlike distributed map mutations, every
+`inc()` is an awaited Redis round trip so concurrent increments cannot be
+coalesced or lost.
 
 ### `createDistributedMap(name, options)`
 

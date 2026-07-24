@@ -3,6 +3,19 @@
 All notable changes to this project will be documented here. This project
 follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.0 — 2026-07-24
+
+### Added
+
+- `createSharedCounter()` for direct, atomic Redis counters that are never
+  buffered or cached.
+- Optional per-key `ttlMs` windows set atomically with the first increment
+  through Lua, suitable for distributed fixed-window rate limiting.
+- Counter namespace isolation and independent expiry for each logical key.
+- Redis-backed tests covering concurrent increments, independent keys,
+  persistent counters, expiry behavior, and input validation.
+- Rate-limiting guides and examples in the README and project website.
+
 ## 0.2.0 — 2026-07-24
 
 ### Added

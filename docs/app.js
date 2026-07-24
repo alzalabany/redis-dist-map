@@ -4,12 +4,16 @@ let toastTimer;
 async function copyText(text, button) {
   await navigator.clipboard.writeText(text);
   const original = button.textContent;
-  if (button.matches(".window-bar button")) button.textContent = "COPIED";
+  if (button.matches(".window-bar button, .copy-code")) {
+    button.textContent = "COPIED";
+  }
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     toast.classList.remove("show");
-    if (button.matches(".window-bar button")) button.textContent = original;
+    if (button.matches(".window-bar button, .copy-code")) {
+      button.textContent = original;
+    }
   }, 1700);
 }
 

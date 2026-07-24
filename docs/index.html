@@ -30,6 +30,7 @@
       </a>
       <nav aria-label="Main navigation">
         <a href="#how">How it works</a>
+        <a href="#use-case">Use cases</a>
         <a href="#api">API</a>
         <a
           class="github-link"
@@ -177,9 +178,308 @@
         </div>
       </section>
 
+      <section class="section market-use-case" id="use-case">
+        <div class="section-heading">
+          <span class="index">02 / MARKET DATA</span>
+          <h2>Absorb the firehose.<br /><span>Serve from memory.</span></h2>
+          <p>
+            Let one process handle the market feed. Every API instance gets
+            the latest price in memory—without polling or a Redis call per read.
+          </p>
+        </div>
+
+        <div class="value-schema" aria-label="Shared price tick type">
+          <span>SHARED VALUE</span>
+          <code>PriceTick { ask: number; bid: number; volume: number }</code>
+        </div>
+
+        <div class="market-flow">
+          <article class="server-card writer-server">
+            <header class="server-head">
+              <div>
+                <span>SERVER 01</span>
+                <strong><i></i> MARKET FEED</strong>
+              </div>
+              <button class="copy-code" type="button" data-copy-target="writer-code">COPY</button>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">ABSORB THE FEED</span>
+              <h3>Keep the hot side lightweight.</h3>
+              <p>Publish only. No snapshot, local Map, or XREAD connection.</p>
+            </div>
+            <pre id="writer-code"><code><span class="kw">import</span> { createDistributedMapWriter } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> writer = <span class="fn">createDistributedMapWriter</span>&lt;<span class="type">PriceTick</span>&gt;(
+  <span class="str">"market:prices"</span>,
+  { client: redis },
+);
+
+feed.<span class="fn">on</span>(<span class="str">"tick"</span>, ({ symbol, ask, bid, volume }) =&gt; {
+  writer.<span class="fn">set</span>(symbol, { ask, bid, volume });
+});</code></pre>
+            <div class="server-foot">
+              <span><i></i> AAPL TICK RECEIVED</span>
+              <strong>213.43 <small>ASK</small></strong>
+            </div>
+          </article>
+
+          <div class="market-link" aria-label="Redis synchronizes the two servers">
+            <span class="flow-label">≤ 50MS</span>
+            <div class="redis-hop">
+              <div class="redis-stack"><i></i><i></i><i></i></div>
+              <strong>REDIS</strong>
+              <small>PATCH</small>
+            </div>
+            <span class="flow-label">XREAD</span>
+          </div>
+
+          <article class="server-card reader-server">
+            <header class="server-head">
+              <div>
+                <span>SERVER 02</span>
+                <strong><i></i> PRICING API</strong>
+              </div>
+              <button class="copy-code" type="button" data-copy-target="reader-code">COPY</button>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">SERVE FROM RAM</span>
+              <h3>Keep the request path fast.</h3>
+              <p>Stream updates arrive before the next customer request.</p>
+            </div>
+            <pre id="reader-code"><code><span class="kw">import</span> { createDistributedMap } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> tickers = <span class="kw">await</span> <span class="fn">createDistributedMap</span>&lt;<span class="type">PriceTick</span>&gt;(
+  <span class="str">"market:prices"</span>,
+  { client: redis },
+);
+
+<span class="comment">// synchronous local read — no Redis round trip</span>
+<span class="kw">const</span> ask = tickers.<span class="fn">get</span>(<span class="str">"AAPL"</span>)?.ask;</code></pre>
+            <div class="server-foot price-live">
+              <span><i></i> AAPL · LOCAL MAP</span>
+              <strong>213.43 <small>ASK</small></strong>
+            </div>
+          </article>
+        </div>
+
+        <p class="flow-note">
+          Ingest once. Fan out automatically. Every pricing endpoint reads the
+          latest value at local Map speed.
+        </p>
+      </section>
+
+      <section class="section market-use-case cache-use-case" id="cache-use-case">
+        <div class="section-heading">
+          <span class="index">03 / ROUTE CACHE</span>
+          <h2>Miss once.<br /><span>Hit everywhere.</span></h2>
+          <p>
+            Whichever API instance fills the cache first shares that response.
+            Every other instance can answer from its own memory.
+          </p>
+        </div>
+
+        <div class="value-schema" aria-label="Shared cached ticker type">
+          <span>SHARED VALUE</span>
+          <code>TickerPage { title: string; summary: string }</code>
+        </div>
+
+        <div class="market-flow">
+          <article class="server-card first-miss-server">
+            <header class="server-head">
+              <div>
+                <span>API INSTANCE 01</span>
+                <strong><i></i> SAME ROUTE</strong>
+              </div>
+              <button class="copy-code" type="button" data-copy-target="cache-writer-code">COPY</button>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">FIRST REQUEST · MISS</span>
+              <h3>One instance pays the miss.</h3>
+              <p>Load the response, return it, and share it automatically.</p>
+            </div>
+            <pre id="cache-writer-code"><code><span class="kw">import</span> { createDistributedMap } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> cache = <span class="kw">await</span> <span class="fn">createDistributedMap</span>&lt;<span class="type">TickerPage</span>&gt;(
+  <span class="str">"cache:ticker-pages"</span>,
+  { client: redis },
+);
+
+app.<span class="fn">get</span>(<span class="str">"/ticker/:name"</span>, <span class="kw">async</span> (request) =&gt; {
+  <span class="kw">const</span> { name } = request.params;
+  <span class="kw">const</span> hit = cache.<span class="fn">get</span>(name);
+  <span class="kw">if</span> (hit !== <span class="kw">undefined</span>) <span class="kw">return</span> hit;
+
+  <span class="kw">const</span> ticker = <span class="kw">await</span> db.<span class="fn">getWikipage</span>(name);
+  cache.<span class="fn">set</span>(name, ticker);
+  <span class="kw">return</span> ticker;
+});</code></pre>
+            <div class="server-foot">
+              <span><i></i> /TICKER/AAPL · DB LOAD</span>
+              <strong>SHARED</strong>
+            </div>
+          </article>
+
+          <div class="market-link" aria-label="Redis distributes the cached response">
+            <span class="flow-label">≤ 50MS</span>
+            <div class="redis-hop">
+              <div class="redis-stack"><i></i><i></i><i></i></div>
+              <strong>REDIS</strong>
+              <small>PATCH</small>
+            </div>
+            <span class="flow-label">XREAD</span>
+          </div>
+
+          <article class="server-card next-hit-server">
+            <header class="server-head">
+              <div>
+                <span>API INSTANCE 02…N</span>
+                <strong><i></i> SAME ROUTE</strong>
+              </div>
+              <button class="copy-code" type="button" data-copy-target="cache-reader-code">COPY</button>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">NEXT REQUEST · HIT</span>
+              <h3>Every instance inherits the hit.</h3>
+              <p>The load balancer can send the next request anywhere.</p>
+            </div>
+            <pre id="cache-reader-code"><code><span class="kw">import</span> { createDistributedMap } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> cache = <span class="kw">await</span> <span class="fn">createDistributedMap</span>&lt;<span class="type">TickerPage</span>&gt;(
+  <span class="str">"cache:ticker-pages"</span>,
+  { client: redis },
+);
+
+app.<span class="fn">get</span>(<span class="str">"/ticker/:name"</span>, <span class="kw">async</span> (request) =&gt; {
+  <span class="kw">const</span> { name } = request.params;
+
+  <span class="comment">// already synced from instance 01</span>
+  <span class="kw">const</span> hit = cache.<span class="fn">get</span>(name);
+  <span class="kw">if</span> (hit !== <span class="kw">undefined</span>) <span class="kw">return</span> hit;
+
+  <span class="kw">const</span> ticker = <span class="kw">await</span> db.<span class="fn">getWikipage</span>(name);
+  cache.<span class="fn">set</span>(name, ticker);
+  <span class="kw">return</span> ticker;
+});</code></pre>
+            <div class="server-foot cache-hit">
+              <span><i></i> /TICKER/AAPL · LOCAL MAP</span>
+              <strong>&lt;1MS <small>HIT</small></strong>
+            </div>
+          </article>
+        </div>
+
+        <p class="flow-note">
+          Same route, every instance. One cache fill turns into local hits
+          across the whole API fleet.
+        </p>
+      </section>
+
+      <section class="section market-use-case rate-limit-use-case" id="rate-limit-use-case">
+        <div class="section-heading">
+          <span class="index">04 / RATE LIMIT</span>
+          <h2>Count once.<br /><span>Enforce everywhere.</span></h2>
+          <p>
+            Every API instance increments the same atomic counter. Request 101
+            is rejected wherever the load balancer sends it.
+          </p>
+        </div>
+
+        <div class="value-schema" aria-label="Shared counter interface">
+          <span>ATOMIC PRIMITIVE</span>
+          <code>SharedCounter { inc(key): Promise&lt;number&gt; }</code>
+        </div>
+
+        <div class="market-flow">
+          <article class="server-card limit-code-server">
+            <header class="server-head">
+              <div>
+                <span>API INSTANCE 01…N</span>
+                <strong><i></i> REQUEST MIDDLEWARE</strong>
+              </div>
+              <button class="copy-code" type="button" data-copy-target="rate-limit-code">COPY</button>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">ONE SHARED WINDOW</span>
+              <h3>Let Redis make every request count.</h3>
+              <p>No local guess, write buffer, or synchronization delay.</p>
+            </div>
+            <pre id="rate-limit-code"><code><span class="kw">import</span> { createSharedCounter } <span class="kw">from</span>
+  <span class="str">"redis-dist-map"</span>;
+
+<span class="kw">const</span> requests = <span class="fn">createSharedCounter</span>(
+  <span class="str">"rate-limit:api"</span>,
+  { client: redis, ttlMs: 60_000 },
+);
+
+app.<span class="fn">use</span>(<span class="kw">async</span> (req, res, next) =&gt; {
+  <span class="kw">const</span> current = <span class="kw">await</span> requests.<span class="fn">inc</span>(req.user.id);
+
+  <span class="kw">if</span> (current &gt; 100) {
+    <span class="kw">return</span> res.<span class="fn">status</span>(429).<span class="fn">send</span>({
+      error: <span class="str">"RATE_LIMITED"</span>,
+      ok: <span class="bool">false</span>,
+    });
+  }
+
+  <span class="fn">next</span>();
+});</code></pre>
+            <div class="server-foot">
+              <span><i></i> USER 42 · REQUEST 100</span>
+              <strong>ALLOW</strong>
+            </div>
+          </article>
+
+          <div class="market-link" aria-label="Redis atomically increments and expires the counter">
+            <span class="flow-label">ATOMIC</span>
+            <div class="redis-hop">
+              <div class="redis-stack"><i></i><i></i><i></i></div>
+              <strong>REDIS</strong>
+              <small>LUA</small>
+            </div>
+            <span class="flow-label">INCR</span>
+          </div>
+
+          <article class="server-card limit-result-server">
+            <header class="server-head">
+              <div>
+                <span>GLOBAL DECISION</span>
+                <strong><i></i> FIXED WINDOW</strong>
+              </div>
+            </header>
+            <div class="server-copy">
+              <span class="server-role">REQUEST 101 · BLOCKED</span>
+              <h3>The limit follows the user.</h3>
+              <p>Any server sees the same count and returns the same decision.</p>
+            </div>
+            <div class="limit-terminal" aria-label="Rate limit response">
+              <div><span>KEY</span><strong>rate-limit:api / user-42</strong></div>
+              <div><span>COUNT</span><strong class="limit-count">101 / 100</strong></div>
+              <div><span>WINDOW</span><strong>60,000 MS</strong></div>
+              <div class="limit-response">
+                <span>HTTP RESPONSE</span>
+                <strong>429</strong>
+                <code>{ "error": "RATE_LIMITED", "ok": false }</code>
+              </div>
+            </div>
+            <div class="server-foot limit-blocked">
+              <span><i></i> USER 42 · REQUEST 101</span>
+              <strong>BLOCK</strong>
+            </div>
+          </article>
+        </div>
+
+        <p class="flow-note">
+          INCR and first-write expiry run in one Lua script. No increment is
+          buffered, coalesced, or lost between API instances.
+        </p>
+      </section>
+
       <section class="section quick-start" id="start">
         <div class="code-intro">
-          <span class="index">02 / START</span>
+          <span class="index">05 / START</span>
           <h2>Reactive state<br />without <span>polling.</span></h2>
           <p>
             Bring an ioredis client. Pick a namespaced key. The first snapshot
@@ -230,10 +530,12 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
 
       <section class="section api" id="api">
         <div class="section-heading compact">
-          <span class="index">03 / API</span>
+          <span class="index">06 / API</span>
           <h2>Small surface.<br /><span>Familiar shape.</span></h2>
         </div>
         <div class="api-grid">
+          <div class="api-item"><code>createSharedCounter()</code><span>→ counter</span><p>Create an atomic Redis counter namespace.</p></div>
+          <div class="api-item"><code>counter.inc(key)</code><span>→ Promise&lt;number&gt;</span><p>Increment immediately with optional first-write expiry.</p></div>
           <div class="api-item"><code>.get(key)</code><span>→ T | undefined</span><p>Read from the local cache.</p></div>
           <div class="api-item"><code>.onChange(key, fn)</code><span>→ unsubscribe()</span><p>React to local and remote changes.</p></div>
           <div class="api-item"><code>.set(key, value)</code><span>→ void</span><p>Update locally and queue a value.</p></div>

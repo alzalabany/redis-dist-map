@@ -1,7 +1,7 @@
 {
   "name": "redis-dist-map",
-  "version": "0.2.0",
-  "description": "A tiny, typed, self-synchronizing distributed Map backed by Redis.",
+  "version": "0.3.0",
+  "description": "Tiny, typed Redis primitives for self-synchronizing Maps and atomic shared counters.",
   "keywords": [
     "redis",
     "distributed",
@@ -15,7 +15,9 @@
     "observable",
     "reactive",
     "publisher",
-    "writer"
+    "writer",
+    "counter",
+    "rate-limit"
   ],
   "homepage": "https://alzalabany.github.io/redis-dist-map/",
   "bugs": {

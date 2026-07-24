@@ -35,6 +35,30 @@ export interface DistributedMapOptions<T>
   onError?: (error: unknown) => void;
 }
 
+/**
+ * Configuration for an atomic Redis-backed shared counter.
+ */
+export interface SharedCounterOptions {
+  /** A connected ioredis client. The counter does not duplicate it. */
+  client: Redis;
+  /**
+   * How long each counter key lives, starting with its first increment.
+   * Omit for counters that should not expire.
+   */
+  ttlMs?: number;
+}
+
+/**
+ * An atomic counter namespace backed directly by Redis.
+ *
+ * Unlike DistributedMap mutations, increments are never buffered or cached.
+ */
+export interface SharedCounter {
+  readonly name: string;
+  /** Atomically increments one key and returns its new value. */
+  inc(key: string): Promise<number>;
+}
+
 export type DistributedMapChangeSource =
   | "local"
   | "remote"
@@ -124,6 +148,14 @@ interface StreamPatch {
   sets: [string, string][];
   deletes: string[];
 }
+
+const SHARED_COUNTER_INCREMENT_SCRIPT = `
+local current = redis.call("INCR", KEYS[1])
+if current == 1 and ARGV[1] ~= "" then
+  redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return current
+`;
 
 function transactionResult(results: TransactionResults, index: number): unknown {
   if (results === null) {
@@ -229,6 +261,32 @@ function parseStreamPatch(value: string): StreamPatch {
   }
 
   return { clear: candidate.clear, sets, deletes };
+}
+
+class RedisSharedCounter implements SharedCounter {
+  private readonly keyPrefix: string;
+
+  constructor(
+    readonly name: string,
+    private readonly client: Redis,
+    private readonly ttlMs: number | undefined,
+  ) {
+    const encodedName = Buffer.from(name, "utf8").toString("base64url");
+    this.keyPrefix = `redis-dist-map:counter:${encodedName}:`;
+  }
+
+  async inc(key: string): Promise<number> {
+    const result = await this.client.eval(
+      SHARED_COUNTER_INCREMENT_SCRIPT,
+      1,
+      `${this.keyPrefix}${key}`,
+      this.ttlMs === undefined ? "" : String(this.ttlMs),
+    );
+    if (typeof result !== "number") {
+      throw new Error("Redis INCR returned a non-numeric value");
+    }
+    return result;
+  }
 }
 
 class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
@@ -911,6 +969,32 @@ function validateWriterOptions<T>(
   if (options.historyMs !== undefined && options.historyMs <= 0) {
     throw new RangeError("historyMs must be greater than zero");
   }
+}
+
+/**
+ * Creates an atomic Redis-backed counter namespace.
+ *
+ * Each inc() call is an immediate Redis round trip. When ttlMs is configured,
+ * the expiry is set atomically on the first increment and is not extended by
+ * later increments.
+ */
+export function createSharedCounter(
+  name: string,
+  options: SharedCounterOptions,
+): SharedCounter {
+  if (name.length === 0) {
+    throw new TypeError("Shared counter name cannot be empty");
+  }
+  if (!options?.client) {
+    throw new TypeError("Redis client is required to create a shared counter");
+  }
+  if (
+    options.ttlMs !== undefined &&
+    (!Number.isSafeInteger(options.ttlMs) || options.ttlMs <= 0)
+  ) {
+    throw new RangeError("ttlMs must be a positive safe integer");
+  }
+  return new RedisSharedCounter(name, options.client, options.ttlMs);
 }
 
 /**

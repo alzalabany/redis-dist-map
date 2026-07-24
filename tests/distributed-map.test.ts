@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDistributedMap,
   createDistributedMapWriter,
+  createSharedCounter,
   type DistributedMap,
   type DistributedMapOptions,
   type DistributedMapWriter,
@@ -622,5 +623,72 @@ describe("createDistributedMap", () => {
     expect(() => map.set("undefined", undefined)).toThrow(
       "must be JSON serializable",
     );
+  });
+});
+
+describe("createSharedCounter", () => {
+  it("atomically increments shared and independent keys", async () => {
+    const first = createSharedCounter("test:counter:atomic", {
+      client,
+      ttlMs: 2_000,
+    });
+    const second = createSharedCounter("test:counter:atomic", {
+      client,
+      ttlMs: 2_000,
+    });
+
+    const values = await Promise.all(
+      Array.from({ length: 100 }, (_, index) =>
+        (index % 2 === 0 ? first : second).inc("ada"),
+      ),
+    );
+
+    expect([...values].sort((left, right) => left - right)).toEqual(
+      Array.from({ length: 100 }, (_, index) => index + 1),
+    );
+    await expect(first.inc("grace")).resolves.toBe(1);
+  });
+
+  it("expires from the first increment without extending the window", async () => {
+    const counter = createSharedCounter("test:counter:expiry", {
+      client,
+      ttlMs: 120,
+    });
+
+    await expect(counter.inc("user")).resolves.toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await expect(counter.inc("user")).resolves.toBe(2);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    await expect(counter.inc("user")).resolves.toBe(1);
+  });
+
+  it("supports persistent counters when ttlMs is omitted", async () => {
+    const counter = createSharedCounter("test:counter:persistent", {
+      client,
+    });
+
+    await expect(counter.inc("user")).resolves.toBe(1);
+    await expect(counter.inc("user")).resolves.toBe(2);
+  });
+
+  it("validates its name, client, and ttl", () => {
+    expect(() => createSharedCounter("", { client })).toThrow(
+      "name cannot be empty",
+    );
+    expect(() =>
+      createSharedCounter("test:counter:no-client", undefined as never),
+    ).toThrow("Redis client is required");
+    expect(() =>
+      createSharedCounter("test:counter:zero-ttl", {
+        client,
+        ttlMs: 0,
+      }),
+    ).toThrow("ttlMs");
+    expect(() =>
+      createSharedCounter("test:counter:fractional-ttl", {
+        client,
+        ttlMs: 1.5,
+      }),
+    ).toThrow("ttlMs");
   });
 });
