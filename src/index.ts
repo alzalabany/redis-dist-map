@@ -29,8 +29,6 @@ export interface DistributedMapOptions<T>
   deserialize?: (value: string) => T;
   /** How long the update listener blocks per Redis XREAD call. Defaults to 1000ms. */
   blockTimeoutMs?: number;
-  /** How often the Hash snapshot repairs trimmed Stream gaps. Defaults to half of historyMs. */
-  synchronizeIntervalMs?: number;
   /** Receives recoverable listener and stream-event errors. */
   onError?: (error: unknown) => void;
 }
@@ -133,15 +131,15 @@ type TransactionResults = [error: Error | null, result: unknown][] | null;
 
 type PendingMutation<T> =
   | {
-      operation: "set";
-      value: T;
-      serialized: string;
-      revision: number;
-    }
+    operation: "set";
+    value: T;
+    serialized: string;
+    revision: number;
+  }
   | {
-      operation: "delete";
-      revision: number;
-    };
+    operation: "delete";
+    revision: number;
+  };
 
 interface StreamPatch {
   clear: boolean;
@@ -155,6 +153,40 @@ if current == 1 and ARGV[1] ~= "" then
   redis.call("PEXPIRE", KEYS[1], ARGV[1])
 end
 return current
+`;
+
+const DISTRIBUTED_MAP_FLUSH_SCRIPT = `
+local argument = 6
+
+if ARGV[3] == "1" then
+  redis.call("DEL", KEYS[1])
+else
+  for _ = 1, tonumber(ARGV[5]) do
+    redis.call("HDEL", KEYS[1], ARGV[argument])
+    argument = argument + 1
+  end
+end
+
+for _ = 1, tonumber(ARGV[4]) do
+  redis.call("HSET", KEYS[1], ARGV[argument], ARGV[argument + 1])
+  argument = argument + 2
+end
+
+local revision = redis.call("INCR", KEYS[3])
+local streamId = redis.call(
+  "XADD",
+  KEYS[2],
+  "MINID",
+  ARGV[1],
+  "*",
+  "operation",
+  "patch",
+  "revision",
+  tostring(revision),
+  "patch",
+  ARGV[2]
+)
+return { streamId, revision }
 `;
 
 function transactionResult(results: TransactionResults, index: number): unknown {
@@ -292,6 +324,7 @@ class RedisSharedCounter implements SharedCounter {
 class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
   protected readonly pending = new Map<string, PendingMutation<T>>();
   protected readonly streamKey: string;
+  protected readonly revisionKey: string;
   protected readonly serialize: (value: T) => string;
   protected running = true;
   protected revision = 0;
@@ -309,6 +342,7 @@ class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
     options: DistributedMapWriterOptions<T>,
   ) {
     this.streamKey = `${name}:stream`;
+    this.revisionKey = `${name}:revision`;
     this.serialize = options.serialize ?? serializeJson;
     this.flushIntervalMs = options.flushIntervalMs ?? 50;
     this.historyMs = options.historyMs ?? 10_000;
@@ -378,8 +412,6 @@ class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
     this.scheduleFlush();
   }
 
-  protected afterFlush(_streamId: string): void {}
-
   protected reportError(error: unknown): void {
     try {
       this.onError(error);
@@ -421,37 +453,29 @@ class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
       }
     }
 
-    let transaction = this.client.multi();
-    let resultIndex = 0;
-    if (clearRevision !== undefined) {
-      transaction = transaction.del(this.name);
-      resultIndex += 1;
-    } else if (patch.deletes.length > 0) {
-      transaction = transaction.hdel(this.name, ...patch.deletes);
-      resultIndex += 1;
-    }
-    if (hashSetArguments.length > 0) {
-      transaction = transaction.hset(this.name, ...hashSetArguments);
-      resultIndex += 1;
-    }
-
     const cutoffId = `${Math.max(0, Date.now() - this.historyMs)}-0`;
-    transaction = transaction.xadd(
+    const result = await this.client.eval(
+      DISTRIBUTED_MAP_FLUSH_SCRIPT,
+      3,
+      this.name,
       this.streamKey,
-      "MINID",
+      this.revisionKey,
       cutoffId,
-      "*",
-      "operation",
-      "patch",
-      "patch",
       JSON.stringify(patch),
+      clearRevision === undefined ? "0" : "1",
+      String(patch.sets.length),
+      String(patch.deletes.length),
+      ...patch.deletes,
+      ...hashSetArguments,
     );
-    const results = await transaction.exec();
-    const streamId = transactionResult(results, resultIndex);
-    if (typeof streamId !== "string") {
-      throw new Error("Redis XADD did not return a stream ID");
+    if (
+      !Array.isArray(result) ||
+      typeof result[0] !== "string" ||
+      typeof result[1] !== "number" ||
+      !Number.isSafeInteger(result[1])
+    ) {
+      throw new Error("Redis map flush returned an invalid result");
     }
-
     if (this.pendingClearRevision === clearRevision) {
       this.pendingClearRevision = undefined;
     }
@@ -460,7 +484,6 @@ class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
         this.pending.delete(key);
       }
     }
-    this.afterFlush(streamId);
   }
 
   private hasPendingThrough(targetRevision: number): boolean {
@@ -497,8 +520,7 @@ class RedisDistributedMapWriter<T> implements DistributedMapWriter<T> {
 
 class RedisDistributedMap<T>
   extends RedisDistributedMapWriter<T>
-  implements DistributedMap<T>
-{
+  implements DistributedMap<T> {
   private readonly cache = new Map<string, T>();
   private readonly serializedCache = new Map<string, string>();
   private readonly listeners = new Set<DistributedMapChangeListener<T>>();
@@ -509,10 +531,9 @@ class RedisDistributedMap<T>
   private readonly subscriber: Redis;
   private readonly deserialize: (value: string) => T;
   private readonly blockTimeoutMs: number;
-  private readonly synchronizeIntervalMs: number;
   private lastReadId = "0-0";
   private lastAppliedId = "0-0";
-  private synchronizeTimer: ReturnType<typeof setInterval> | undefined;
+  private lastAppliedRevision = 0;
   private listenerPromise: Promise<void> = Promise.resolve();
   private mapDestroyPromise: Promise<void> | undefined;
 
@@ -525,22 +546,15 @@ class RedisDistributedMap<T>
     this.subscriber = client.duplicate();
     this.deserialize = options.deserialize ?? deserializeJson;
     this.blockTimeoutMs = options.blockTimeoutMs ?? 1_000;
-    this.synchronizeIntervalMs =
-      options.synchronizeIntervalMs ??
-      Math.max(1, Math.floor((options.historyMs ?? 10_000) / 2));
   }
 
   async initialize(): Promise<void> {
     try {
-      const { cursor, values, serializedValues } = await this.loadSnapshot();
-      this.replaceCache(values, serializedValues, cursor);
+      const { cursor, revision, values, serializedValues } =
+        await this.loadSnapshot();
+      this.replaceCache(values, serializedValues, cursor, revision);
       this.lastReadId = cursor;
       this.listenerPromise = this.listenForUpdates();
-      this.synchronizeTimer = setInterval(() => {
-        void this.synchronize().catch((error: unknown) => {
-          if (this.running) this.reportError(error);
-        });
-      }, this.synchronizeIntervalMs);
     } catch (error) {
       this.subscriber.disconnect();
       await super.destroy();
@@ -670,10 +684,18 @@ class RedisDistributedMap<T>
 
   async synchronize(): Promise<void> {
     this.assertRunning();
-    const { cursor, values, serializedValues } = await this.loadSnapshot();
+    const { cursor, revision, values, serializedValues } =
+      await this.loadSnapshot();
 
-    if (compareStreamIds(cursor, this.lastAppliedId) >= 0) {
-      this.replaceCache(values, serializedValues, cursor, "synchronize");
+    if (revision >= this.lastAppliedRevision) {
+      this.replaceCache(
+        values,
+        serializedValues,
+        cursor,
+        revision,
+        "synchronize",
+      );
+      this.lastReadId = cursor;
     }
   }
 
@@ -681,10 +703,6 @@ class RedisDistributedMap<T>
     if (this.mapDestroyPromise !== undefined) return this.mapDestroyPromise;
 
     const writerDestroy = super.destroy();
-    if (this.synchronizeTimer !== undefined) {
-      clearInterval(this.synchronizeTimer);
-      this.synchronizeTimer = undefined;
-    }
     this.subscriber.disconnect();
     this.listeners.clear();
     this.keyListeners.clear();
@@ -695,28 +713,32 @@ class RedisDistributedMap<T>
     return this.mapDestroyPromise;
   }
 
-  protected override afterFlush(streamId: string): void {
-    this.advanceAppliedId(streamId);
-  }
-
   private async loadSnapshot(): Promise<{
     cursor: string;
+    revision: number;
     values: Map<string, T>;
     serializedValues: Map<string, string>;
   }> {
     const results = await this.client
       .multi()
+      .get(this.revisionKey)
       .xrevrange(this.streamKey, "+", "-", "COUNT", 1)
       .hgetall(this.name)
       .exec();
-    const streamEntries = transactionResult(results, 0);
-    const hash = transactionResult(results, 1);
+    const rawRevision = transactionResult(results, 0);
+    const streamEntries = transactionResult(results, 1);
+    const hash = transactionResult(results, 2);
     if (
+      (rawRevision !== null && typeof rawRevision !== "string") ||
       !Array.isArray(streamEntries) ||
       hash === null ||
       typeof hash !== "object"
     ) {
       throw new Error("Redis returned an invalid distributed map snapshot");
+    }
+    const revision = rawRevision === null ? 0 : Number(rawRevision);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      throw new Error("Redis returned an invalid distributed map revision");
     }
 
     const newestEntry: unknown = streamEntries[0];
@@ -739,7 +761,7 @@ class RedisDistributedMap<T>
       values.set(key, this.deserialize(serialized));
       serializedValues.set(key, serialized);
     }
-    return { cursor, values, serializedValues };
+    return { cursor, revision, values, serializedValues };
   }
 
   private async listenForUpdates(): Promise<void> {
@@ -756,9 +778,12 @@ class RedisDistributedMap<T>
 
         for (const [, messages] of results) {
           for (const [id, fields] of messages) {
-            this.lastReadId = id;
+            if (compareStreamIds(id, this.lastReadId) > 0) {
+              this.lastReadId = id;
+            }
             try {
-              this.applyStreamEvent(id, fields);
+              const applied = this.applyStreamEvent(id, fields);
+              if (!applied) await this.synchronize();
             } catch (error) {
               this.reportError(error);
               await this.synchronize();
@@ -778,43 +803,64 @@ class RedisDistributedMap<T>
     }
   }
 
-  private applyStreamEvent(id: string, fields: string[]): void {
-    if (compareStreamIds(id, this.lastAppliedId) <= 0) return;
+  private applyStreamEvent(id: string, fields: string[]): boolean {
+    if (compareStreamIds(id, this.lastAppliedId) <= 0) return true;
 
-    const previousValues = new Map(this.cache);
-    const previousSerialized = new Map(this.serializedCache);
     const event = streamFieldsToRecord(fields);
-    const operation = event.operation ?? (event.value === "" ? "delete" : "set");
+    if (event.operation !== "patch" || event.patch === undefined) {
+      throw new Error("Distributed map stream event is not a patch");
+    }
+    const revision = Number(event.revision);
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      throw new Error("Distributed map stream event has an invalid revision");
+    }
+    if (revision <= this.lastAppliedRevision) return true;
+    if (revision !== this.lastAppliedRevision + 1) return false;
 
-    if (operation === "patch") {
-      if (event.patch === undefined) {
-        throw new Error("Patch event has no patch");
-      }
-      this.applyPatch(parseStreamPatch(event.patch));
-    } else if (operation === "clear") {
-      this.cache.clear();
-      this.serializedCache.clear();
-      this.applyPendingOverlay();
-    } else if (operation === "delete") {
-      if (event.key === undefined) throw new Error("Delete event has no key");
-      if (!this.isLocallyShadowed(event.key)) {
-        this.cache.delete(event.key);
-        this.serializedCache.delete(event.key);
-      }
-    } else if (operation === "set") {
-      if (event.key === undefined || event.value === undefined) {
-        throw new Error("Set event has no key or value");
-      }
-      if (!this.isLocallyShadowed(event.key)) {
-        this.cache.set(event.key, this.deserialize(event.value));
-        this.serializedCache.set(event.key, event.value);
+    const patch = parseStreamPatch(event.patch);
+    const affectedKeys = patch.clear
+      ? undefined
+      : new Set([
+        ...patch.deletes,
+        ...patch.sets.map(([key]) => key),
+      ]);
+    this.applyRemoteMutation(id, revision, affectedKeys, () =>
+      this.applyPatch(patch),
+    );
+    return true;
+  }
+
+  private applyRemoteMutation(
+    id: string,
+    revision: number,
+    affectedKeys: ReadonlySet<string> | undefined,
+    apply: () => void,
+  ): void {
+    const previousValues = new Map<string, T>();
+    const previousSerialized = new Map<string, string>();
+
+    if (affectedKeys === undefined) {
+      for (const [key, value] of this.cache) previousValues.set(key, value);
+      for (const [key, value] of this.serializedCache) {
+        previousSerialized.set(key, value);
       }
     } else {
-      throw new Error(`Unknown distributed map operation: ${operation}`);
+      for (const key of affectedKeys) {
+        if (!this.cache.has(key)) continue;
+        previousValues.set(key, this.cache.get(key) as T);
+        previousSerialized.set(key, this.serializedCache.get(key) as string);
+      }
     }
 
+    apply();
     this.lastAppliedId = id;
-    this.emitCacheDiff(previousValues, previousSerialized, "remote");
+    this.lastAppliedRevision = revision;
+    this.emitCacheDiff(
+      previousValues,
+      previousSerialized,
+      "remote",
+      affectedKeys,
+    );
   }
 
   private applyPatch(patch: StreamPatch): void {
@@ -858,15 +904,11 @@ class RedisDistributedMap<T>
     }
   }
 
-  private advanceAppliedId(id: string): void {
-    if (compareStreamIds(id, this.lastAppliedId) <= 0) return;
-    this.lastAppliedId = id;
-  }
-
   private replaceCache(
     values: Map<string, T>,
     serializedValues: Map<string, string>,
     cursor: string,
+    revision: number,
     source?: DistributedMapChangeSource,
   ): void {
     const previousValues = source === undefined ? undefined : new Map(this.cache);
@@ -880,6 +922,7 @@ class RedisDistributedMap<T>
     }
     this.applyPendingOverlay();
     this.lastAppliedId = cursor;
+    this.lastAppliedRevision = revision;
     if (
       source !== undefined &&
       previousValues !== undefined &&
@@ -893,8 +936,11 @@ class RedisDistributedMap<T>
     previousValues: Map<string, T>,
     previousSerialized: Map<string, string>,
     source: DistributedMapChangeSource,
+    affectedKeys?: ReadonlySet<string>,
   ): void {
-    const keys = new Set([...previousValues.keys(), ...this.cache.keys()]);
+    const keys =
+      affectedKeys ??
+      new Set([...previousValues.keys(), ...this.cache.keys()]);
     for (const key of keys) {
       const existed = previousValues.has(key);
       const exists = this.cache.has(key);
@@ -1020,12 +1066,6 @@ export async function createDistributedMap<T>(
   validateWriterOptions(name, options);
   if (options.blockTimeoutMs !== undefined && options.blockTimeoutMs <= 0) {
     throw new RangeError("blockTimeoutMs must be greater than zero");
-  }
-  if (
-    options.synchronizeIntervalMs !== undefined &&
-    options.synchronizeIntervalMs <= 0
-  ) {
-    throw new RangeError("synchronizeIntervalMs must be greater than zero");
   }
 
   const map = new RedisDistributedMap(name, options.client, options);

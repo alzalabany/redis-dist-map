@@ -1,18 +1,17 @@
+import { Redis } from "ioredis";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { Redis } from "ioredis";
-import { autorun, isObservable } from "mobx";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDistributedMap,
   createDistributedMapWriter,
   createSharedCounter,
   type DistributedMap,
+  type DistributedMapChangeSource,
   type DistributedMapOptions,
   type DistributedMapWriter,
 } from "../src/index.js";
-import { createMobxDistributedMap } from "../src/mobx.js";
 
 let server: ChildProcessWithoutNullStreams;
 let client: Redis;
@@ -213,6 +212,9 @@ describe("createDistributedMap", () => {
     );
     const fields = entries[0]?.[1] ?? [];
     const patchIndex = fields.lastIndexOf("patch");
+    const revisionIndex = fields.indexOf("revision");
+    expect(fields[revisionIndex + 1]).toBe("1");
+    expect(await client.get("test:write-behind:revision")).toBe("1");
     expect(JSON.parse(fields[patchIndex + 1] ?? "")).toEqual({
       clear: false,
       sets: [
@@ -239,6 +241,25 @@ describe("createDistributedMap", () => {
     await waitFor(() => second.size === 2);
     await second.clear();
     await waitFor(() => first.size === 0);
+  });
+
+  it("does not skip remote revisions when a readable map also flushes", async () => {
+    const name = "test:concurrent-readable-writer";
+    const reader = await makeMap<number>(name, {
+      flushIntervalMs: 10_000,
+    });
+    const writer = createDistributedMapWriter<number>(name, {
+      client,
+      flushIntervalMs: 10_000,
+    });
+    writers.push(writer as DistributedMapWriter<unknown>);
+
+    writer.set("remote", 1);
+    reader.set("local", 2);
+    await Promise.all([writer.flush(), reader.flush()]);
+
+    await waitFor(() => reader.get("remote") === 1);
+    expect(reader.get("local")).toBe(2);
   });
 
   it("notifies global and key listeners for local, remote, and repaired changes", async () => {
@@ -318,89 +339,6 @@ describe("createDistributedMap", () => {
     expect(errors[0]).toEqual(new Error("listener failed"));
   });
 
-  it("provides MobX-tracked reads and batches each remote patch", async () => {
-    const writer = await makeMap<number>("test:mobx", {
-      flushIntervalMs: 10_000,
-    });
-    const reader = await createMobxDistributedMap<number>("test:mobx", {
-      client,
-      blockTimeoutMs: 50,
-    });
-    maps.push(reader as DistributedMap<unknown>);
-    const snapshots: Array<[number | undefined, number | undefined]> = [];
-    const stop = autorun(() => {
-      snapshots.push([reader.get("a"), reader.get("b")]);
-    });
-
-    expect(snapshots).toEqual([[undefined, undefined]]);
-    writer.set("a", 1);
-    writer.set("b", 2);
-    await writer.flush();
-    await waitFor(() => snapshots.length === 2);
-    expect(snapshots).toEqual([
-      [undefined, undefined],
-      [1, 2],
-    ]);
-
-    reader.set("a", 3);
-    expect(snapshots.at(-1)).toEqual([3, 2]);
-    stop();
-
-    expect(reader.name).toBe("test:mobx");
-    expect(reader.size).toBe(2);
-    expect(reader.has("a")).toBe(true);
-    expect([...reader.entries()]).toEqual([
-      ["a", 3],
-      ["b", 2],
-    ]);
-    expect([...reader.keys()]).toEqual(["a", "b"]);
-    expect([...reader.values()]).toEqual([3, 2]);
-    expect([...reader]).toEqual([
-      ["a", 3],
-      ["b", 2],
-    ]);
-    const visited: string[] = [];
-    reader.forEach((value, key) => visited.push(`${key}:${value}`));
-    expect(visited).toEqual(["a:3", "b:2"]);
-
-    const changes: string[] = [];
-    const unsubscribeGlobal = reader.onChange((change) => {
-      changes.push(`all:${change.key}:${change.operation}`);
-    });
-    const unsubscribeKey = reader.onChange("c", (_value, change) => {
-      changes.push(`key:${change.key}:${change.operation}`);
-    });
-    reader.set("c", 4);
-    expect(reader.delete("c")).toBe(true);
-    expect(changes).toEqual([
-      "all:c:set",
-      "key:c:set",
-      "all:c:delete",
-      "key:c:delete",
-    ]);
-    unsubscribeGlobal();
-    unsubscribeKey();
-    expect(() =>
-      Reflect.apply(reader.onChange, reader, ["missing-listener"]),
-    ).toThrow("A key change listener is required");
-
-    reader.clear();
-    expect(reader.size).toBe(0);
-    await reader.flush();
-    await client.hset("test:mobx", "recovered", JSON.stringify(5));
-    await reader.synchronize();
-    expect(reader.get("recovered")).toBe(5);
-
-    const quotes = await createMobxDistributedMap<{ bid: number }>(
-      "test:mobx-shallow",
-      { client, blockTimeoutMs: 50 },
-    );
-    maps.push(quotes as DistributedMap<unknown>);
-    quotes.set("XAUUSD.m", { bid: 3_400 });
-    expect(isObservable(quotes.get("XAUUSD.m"))).toBe(false);
-    await quotes.destroy();
-  });
-
   it("keeps pending local state over older remote updates", async () => {
     const map = await makeMap<number>("test:local-overlay", {
       flushIntervalMs: 10_000,
@@ -410,15 +348,20 @@ describe("createDistributedMap", () => {
     await client
       .multi()
       .hset("test:local-overlay", "price", JSON.stringify(10))
+      .set("test:local-overlay:revision", "1")
       .xadd(
         "test:local-overlay:stream",
         "*",
         "operation",
-        "set",
-        "key",
-        "price",
-        "value",
-        JSON.stringify(10),
+        "patch",
+        "revision",
+        "1",
+        "patch",
+        JSON.stringify({
+          clear: false,
+          sets: [["price", JSON.stringify(10)]],
+          deletes: [],
+        }),
       )
       .exec();
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -448,17 +391,60 @@ describe("createDistributedMap", () => {
     expect(entries[0]?.[0]).not.toBe("1-0");
   });
 
-  it("periodically repairs state from the authoritative Hash", async () => {
-    const map = await makeMap<number>("test:periodic-snapshot", {
-      synchronizeIntervalMs: 25,
+  it("does not poll the authoritative Hash while the stream is healthy", async () => {
+    const map = await makeMap<number>("test:no-periodic-snapshot", {
+      historyMs: 20,
     });
 
     await client.hset(
-      "test:periodic-snapshot",
-      "recovered",
+      "test:no-periodic-snapshot",
+      "unannounced",
       JSON.stringify(99),
     );
-    await waitFor(() => map.get("recovered") === 99);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(map.get("unannounced")).toBeUndefined();
+
+    await map.synchronize();
+    expect(map.get("unannounced")).toBe(99);
+  });
+
+  it("repairs from the Hash when a Stream revision is skipped", async () => {
+    const name = "test:revision-gap";
+    const map = await makeMap<number>(name);
+    const changes: DistributedMapChangeSource[] = [];
+    map.onChange((change) => changes.push(change.source));
+
+    await client
+      .multi()
+      .hset(name, "missed", JSON.stringify(1))
+      .hset(name, "latest", JSON.stringify(2))
+      .set(`${name}:revision`, "2")
+      .xadd(
+        `${name}:stream`,
+        "*",
+        "operation",
+        "patch",
+        "revision",
+        "2",
+        "patch",
+        JSON.stringify({
+          clear: false,
+          sets: [["latest", JSON.stringify(2)]],
+          deletes: [],
+        }),
+      )
+      .exec();
+
+    await waitFor(() => map.get("missed") === 1);
+    expect(map.get("latest")).toBe(2);
+    expect(changes).toEqual(["synchronize", "synchronize"]);
+
+    const writer = createDistributedMapWriter<number>(name, { client });
+    writers.push(writer as DistributedMapWriter<unknown>);
+    writer.set("next", 3);
+    await writer.flush();
+    await waitFor(() => map.get("next") === 3);
+    expect(changes.at(-1)).toBe("remote");
   });
 
   it("does not make unflushed mutations durable during destroy", async () => {
@@ -474,36 +460,17 @@ describe("createDistributedMap", () => {
   });
 
   it("loads an existing snapshot and can reload authoritative state", async () => {
-    await client.hset("test:snapshot", "ready", JSON.stringify(true));
-    const streamId = await client.xadd(
-      "test:snapshot:stream",
-      "*",
-      "operation",
-      "set",
-      "key",
-      "ready",
-      "value",
-      JSON.stringify(true),
-    );
-    expect(streamId).toBeTypeOf("string");
+    const writer = createDistributedMapWriter<boolean>("test:snapshot", {
+      client,
+    });
+    writers.push(writer as DistributedMapWriter<unknown>);
+    writer.set("ready", true);
+    await writer.flush();
 
     const map = await makeMap<boolean>("test:snapshot");
     expect(map.get("ready")).toBe(true);
 
-    await client
-      .multi()
-      .hset("test:snapshot", "ready", JSON.stringify(false))
-      .xadd(
-        "test:snapshot:stream",
-        "*",
-        "operation",
-        "set",
-        "key",
-        "ready",
-        "value",
-        JSON.stringify(false),
-      )
-      .exec();
+    await client.hset("test:snapshot", "ready", JSON.stringify(false));
     await map.synchronize();
     expect(map.get("ready")).toBe(false);
   });
@@ -544,20 +511,12 @@ describe("createDistributedMap", () => {
     );
     await waitFor(() => errorCount === 1);
 
-    await client
-      .multi()
-      .hset("test:recovery", "healthy", JSON.stringify(42))
-      .xadd(
-        "test:recovery:stream",
-        "*",
-        "operation",
-        "set",
-        "key",
-        "healthy",
-        "value",
-        JSON.stringify(42),
-      )
-      .exec();
+    const writer = createDistributedMapWriter<number>("test:recovery", {
+      client,
+    });
+    writers.push(writer as DistributedMapWriter<unknown>);
+    writer.set("healthy", 42);
+    await writer.flush();
     await waitFor(() => map.get("healthy") === 42);
   });
 
@@ -605,13 +564,6 @@ describe("createDistributedMap", () => {
         historyMs: 0,
       }),
     ).rejects.toThrow("historyMs");
-    await expect(
-      createDistributedMap("test:synchronize-timeout", {
-        client,
-        synchronizeIntervalMs: 0,
-      }),
-    ).rejects.toThrow("synchronizeIntervalMs");
-
     const map = await makeMap<string>("test:destroy");
     await map.destroy();
     expect(() => map.set("nope", "value")).toThrow("is destroyed");

@@ -118,8 +118,7 @@
           <span>BATCHED WRITES</span><i>◆</i>
           <span>WRITER-ONLY MODE</span><i>◆</i>
           <span>ORDERED EVENTS</span><i>◆</i>
-          <span>FULLY TYPED</span><i>◆</i>
-          <span>OPTIONAL MOBX ADAPTER</span>
+          <span>FULLY TYPED</span>
         </div>
       </section>
 
@@ -172,7 +171,8 @@
             <h3>Converge everywhere</h3>
             <p>
               Blocking Stream readers apply ordered events to every live
-              instance, while snapshots make recovery straightforward.
+              instance. Revision gaps trigger a snapshot only when recovery is
+              needed.
             </p>
           </article>
         </div>
@@ -490,7 +490,6 @@ app.<span class="fn">use</span>(<span class="kw">async</span> (req, res, next) =
             <li><span>✓</span> TypeScript declarations included</li>
             <li><span>✓</span> Reactive key subscriptions</li>
             <li><span>✓</span> No-sync writer-only mode</li>
-            <li><span>✓</span> Optional shallow MobX adapter</li>
           </ul>
         </div>
         <div class="code-window">
@@ -545,7 +544,6 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
           <div class="api-item"><code>.synchronize()</code><span>→ Promise&lt;void&gt;</span><p>Reload the Redis snapshot.</p></div>
           <div class="api-item"><code>.destroy()</code><span>→ Promise&lt;void&gt;</span><p>Stop listening and clean up.</p></div>
           <div class="api-item"><code>createDistributedMapWriter()</code><span>→ writer</span><p>Publish without a snapshot or XREAD connection.</p></div>
-          <div class="api-item"><code>redis-dist-map/mobx</code><span>→ optional</span><p>MobX-tracked reads and batched reactions.</p></div>
         </div>
       </section>
 
@@ -553,7 +551,7 @@ flags.<span class="fn">get</span>(<span class="str">"new-checkout"</span>); <spa
         <div>
           <span class="index">READY?</span>
           <h2>Keep your state<br /><span>close.</span></h2>
-          <p>One familiar abstraction. Optional MobX. Every process in sync.</p>
+          <p>One familiar abstraction. Every process in sync.</p>
           <div class="hero-actions">
             <a class="button light" href="https://www.npmjs.com/package/redis-dist-map">View on npm</a>
             <a class="text-link" href="https://github.com/alzalabany/redis-dist-map">Read the source →</a>

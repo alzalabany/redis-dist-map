@@ -227,9 +227,10 @@ as one patch. The patch updates the Redis Hash and appends a Redis Stream event
 in one transaction. Every readable map keeps a blocking stream reader on a
 duplicated ioredis connection; write-only publishers skip that work entirely.
 
-The Stream retains ten seconds of patches by default using `XADD MINID`.
-Periodic Hash snapshots repair replicas that were offline longer than the
-retention window.
+The Stream retains ten seconds of patches by default using `XADD MINID`. Each
+atomic patch increments a map revision. Readers reload the Hash only when a
+revision gap proves that trimmed events were missed or when an event cannot be
+applied.
 
 ### Consistency model
 
@@ -241,8 +242,9 @@ retention window.
   Redis/network latency.
 - Change listeners fire immediately for local mutations and after application
   for remote or snapshot-recovery mutations.
-- Events are applied in Redis Stream ID order and duplicate events are ignored.
-- Periodic `synchronize()` calls reload the authoritative Hash after trimmed gaps.
+- Events are applied in revision order and duplicate events are ignored.
+- A skipped revision automatically reloads the authoritative Hash; healthy
+  readers do not poll snapshots.
 - An abrupt process crash can lose up to one flush window of local mutations.
 - This is not a linearizable distributed data structure: a remote instance can
   briefly return its previous value, and concurrent writers resolve in Redis
@@ -255,16 +257,15 @@ npm install redis-dist-map ioredis
 ```
 
 Requires Node.js 18+, ioredis 5+, and Redis 6.2+ (`XADD MINID`).
-MobX is optional and only needed when importing `redis-dist-map/mobx`.
 
 Install a specific GitHub release without using the npm registry:
 
 ```bash
-npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.3.0
+npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.4.0
 ```
 
 Git installs build the package locally during installation. Add `ioredis` to
-the consuming project, plus `mobx` when using the optional MobX adapter.
+the consuming project.
 
 ## API
 
@@ -316,7 +317,6 @@ type DistributedMapOptions<T> = {
   blockTimeoutMs?: number;
   flushIntervalMs?: number;       // default: 50
   historyMs?: number;             // default: 10_000
-  synchronizeIntervalMs?: number; // default: historyMs / 2
   onError?: (error: unknown) => void;
 };
 ```
@@ -436,58 +436,6 @@ the initial snapshot. A listener fires only when the serialized value changes
 or an existing key is deleted. Listener exceptions are isolated and forwarded
 to `onError`.
 
-### Optional MobX adapter
-
-Install MobX alongside the core package:
-
-```bash
-npm install redis-dist-map ioredis mobx
-```
-
-Then use the `redis-dist-map/mobx` entry point:
-
-```ts
-import Redis from "ioredis";
-import { autorun } from "mobx";
-import { createMobxDistributedMap } from "redis-dist-map/mobx";
-
-type Tick = {
-  time: number;
-  ask: number;
-  bid: number;
-};
-
-const redis = new Redis(process.env.REDIS_URL);
-const prices = await createMobxDistributedMap<Tick>("prices", {
-  client: redis,
-});
-
-const stop = autorun(() => {
-  console.log("XAUUSD.m", prices.get("XAUUSD.m"));
-});
-
-prices.set("XAUUSD.m", {
-  time: Date.now(),
-  ask: 3400.12,
-  bid: 3399.98,
-});
-
-stop();
-await prices.flush();
-await prices.destroy();
-await redis.quit();
-```
-
-The returned object has the same `DistributedMap<T>` API. Its reads participate
-in MobX tracking, local writes react immediately, and every received Redis patch
-is applied inside one MobX action. Values are observed shallowly, so replacing a
-quote triggers reactions without recursively turning the quote itself into a
-MobX observable.
-
-The normal `redis-dist-map` entry point never imports MobX. It remains an
-optional peer dependency, so projects using only the core map do not need to
-install it.
-
 ### Lifecycle
 
 Call `flush()` during graceful shutdown, then call `destroy()`. Destroy stops
@@ -504,7 +452,8 @@ process.once("SIGTERM", async () => {
 
 ## Operational notes
 
-- The map uses two keys: `<name>` for the hash and `<name>:stream` for events.
+- The map uses three keys: `<name>` for the Hash, `<name>:stream` for events,
+  and `<name>:revision` for gap detection.
 - Stream patches are trimmed by age on every flush. During a completely idle
   period, the last retained patch remains until another flush performs trimming.
 - The default 50ms buffer emits at most 20 transactions per second per active

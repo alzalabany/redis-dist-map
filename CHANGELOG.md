@@ -3,6 +3,20 @@
 All notable changes to this project will be documented here. This project
 follows [Semantic Versioning](https://semver.org/).
 
+## 0.4.0 — 2026-09-15
+
+### Changed
+
+- Replaced periodic Hash snapshot polling with atomic map revisions. Readers
+  now reload the authoritative snapshot only after a Stream revision gap or a
+  malformed event.
+- Removed the `synchronizeIntervalMs` option.
+
+### Removed
+
+- The optional MobX adapter and `redis-dist-map/mobx` subpath export. Use
+  `onChange()` subscriptions to observe local and remote map changes.
+
 ## 0.3.0 — 2026-07-24
 
 ### Added
