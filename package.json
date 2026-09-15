@@ -1,6 +1,6 @@
 {
   "name": "redis-dist-map",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Tiny, typed Redis primitives for self-synchronizing Maps and atomic shared counters.",
   "keywords": [
     "redis",

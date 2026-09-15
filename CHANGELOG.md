@@ -3,6 +3,13 @@
 All notable changes to this project will be documented here. This project
 follows [Semantic Versioning](https://semver.org/).
 
+## 0.4.1 — 2026-09-15
+
+### Changed
+
+- `set()` now skips values that serialize identically to the cached value,
+  avoiding redundant change events, Redis writes, revisions, and Stream entries.
+
 ## 0.4.0 — 2026-09-15
 
 ### Changed

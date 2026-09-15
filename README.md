@@ -226,6 +226,8 @@ Local mutations are coalesced by key for up to `flushIntervalMs` and persisted
 as one patch. The patch updates the Redis Hash and appends a Redis Stream event
 in one transaction. Every readable map keeps a blocking stream reader on a
 duplicated ioredis connection; write-only publishers skip that work entirely.
+Calling `set()` with a value that serializes identically to the cached value is
+a no-op: it does not emit a change, queue a write, or create a Stream event.
 
 The Stream retains ten seconds of patches by default using `XADD MINID`. Each
 atomic patch increments a map revision. Readers reload the Hash only when a
@@ -261,7 +263,7 @@ Requires Node.js 18+, ioredis 5+, and Redis 6.2+ (`XADD MINID`).
 Install a specific GitHub release without using the npm registry:
 
 ```bash
-npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.4.0
+npm install git+https://github.com/alzalabany/redis-dist-map.git#v0.4.1
 ```
 
 Git installs build the package locally during installation. Add `ioredis` to

@@ -631,20 +631,19 @@ class RedisDistributedMap<T>
   set(key: string, value: T): void {
     this.assertRunning();
     const serialized = this.serialize(value);
+    if (this.serializedCache.get(key) === serialized) return;
+
     const previousValue = this.cache.get(key);
-    const changed = this.serializedCache.get(key) !== serialized;
     this.cache.set(key, value);
     this.serializedCache.set(key, serialized);
     this.queueSet(key, value, serialized);
-    if (changed) {
-      this.emitChange({
-        key,
-        operation: "set",
-        value,
-        previousValue,
-        source: "local",
-      });
-    }
+    this.emitChange({
+      key,
+      operation: "set",
+      value,
+      previousValue,
+      source: "local",
+    });
   }
 
   delete(key: string): boolean {

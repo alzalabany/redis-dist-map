@@ -225,6 +225,28 @@ describe("createDistributedMap", () => {
     });
   });
 
+  it("skips writes when the serialized value is unchanged", async () => {
+    const map = await makeMap<{ ask: number; bid: number }>(
+      "test:unchanged-value",
+      { flushIntervalMs: 10_000 },
+    );
+    const changes: Array<{ ask: number; bid: number }> = [];
+    map.onChange((change) => {
+      if (change.value !== undefined) changes.push(change.value);
+    });
+
+    const original = { ask: 1, bid: 2 };
+    map.set("AAPL", original);
+    await map.flush();
+    map.set("AAPL", { ask: 1, bid: 2 });
+    await map.flush();
+
+    expect(map.get("AAPL")).toBe(original);
+    expect(changes).toEqual([original]);
+    expect(await client.get("test:unchanged-value:revision")).toBe("1");
+    expect(await client.xlen("test:unchanged-value:stream")).toBe(1);
+  });
+
   it("synchronizes writes, deletes, and clears across instances", async () => {
     const first = await makeMap<number>("test:replication");
     const second = await makeMap<number>("test:replication");
